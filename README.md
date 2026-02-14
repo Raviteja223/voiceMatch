@@ -74,8 +74,8 @@ You can then open on Android/iOS/web from Expo CLI.
 
 ## 3) Authentication and OTP
 
-- OTP is currently **mocked**.
-- Use `1234` as the OTP code in the app.
+- OTP uses **MSG91** when configured via environment variables.
+- If MSG91 is not configured, backend falls back to mocked OTP (`1234`) for local development.
 
 ---
 
@@ -88,7 +88,17 @@ When `/api/calls/start` is called:
 
 ---
 
-## 5) Notes on MSG91
+## 5) MSG91 Configuration
 
-- MSG91 is **not yet integrated** in current backend OTP flow.
-- Current OTP verification remains mocked (`1234`) until SMS provider integration is implemented.
+Add these optional variables to `backend/.env` to enable real OTP delivery/verification via MSG91:
+
+```env
+MSG91_AUTH_KEY=your_msg91_auth_key
+MSG91_TEMPLATE_ID=your_msg91_template_id
+MSG91_OTP_EXPIRY_MINUTES=5
+MSG91_OTP_LENGTH=4
+# Optional override
+MSG91_BASE_URL=https://control.msg91.com
+```
+
+Without `MSG91_AUTH_KEY` + `MSG91_TEMPLATE_ID`, the app stays in mock OTP mode (`1234`).
