@@ -31,6 +31,11 @@ HMS_ACCESS_KEY = os.getenv("HMS_ACCESS_KEY", "")
 HMS_SECRET_KEY = os.getenv("HMS_SECRET_KEY", "")
 HMS_API_BASE = os.getenv("HMS_API_BASE", "https://api.100ms.live/v2")
 HMS_TOKEN_ROLE = os.getenv("HMS_TOKEN_ROLE", "host")
+MSG91_AUTH_KEY = os.getenv("MSG91_AUTH_KEY", "")
+MSG91_TEMPLATE_ID = os.getenv("MSG91_TEMPLATE_ID", "")
+MSG91_OTP_EXPIRY_MINUTES = int(os.getenv("MSG91_OTP_EXPIRY_MINUTES", "5"))
+MSG91_OTP_LENGTH = int(os.getenv("MSG91_OTP_LENGTH", "4"))
+MSG91_BASE_URL = os.getenv("MSG91_BASE_URL", "https://control.msg91.com")
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -118,6 +123,74 @@ def now():
 
 def uid():
     return str(uuid.uuid4())
+
+
+def is_msg91_configured() -> bool:
+    return bool(MSG91_AUTH_KEY and MSG91_TEMPLATE_ID)
+
+
+def _normalize_phone_for_msg91(phone: str) -> str:
+    return phone.lstrip("+")
+
+
+def send_msg91_otp(phone: str):
+    if not is_msg91_configured():
+        return {"success": False, "message": "MSG91 is not configured"}
+
+    mobile = _normalize_phone_for_msg91(phone)
+    try:
+        res = requests.post(
+            f"{MSG91_BASE_URL}/api/v5/otp",
+            params={
+                "template_id": MSG91_TEMPLATE_ID,
+                "mobile": mobile,
+                "authkey": MSG91_AUTH_KEY,
+                "otp_expiry": MSG91_OTP_EXPIRY_MINUTES,
+                "otp_length": MSG91_OTP_LENGTH,
+            },
+            timeout=10,
+        )
+        payload = res.json()
+        if res.status_code != 200:
+            logger.warning("MSG91 send OTP failed: status=%s body=%s", res.status_code, payload)
+            return {"success": False, "message": payload.get("message") or "Unable to send OTP"}
+
+        return {
+            "success": payload.get("type") == "success",
+            "message": payload.get("message", "OTP sent"),
+        }
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("MSG91 send OTP request failed: %s", exc)
+        return {"success": False, "message": "Unable to send OTP right now"}
+
+
+def verify_msg91_otp(phone: str, otp: str):
+    if not is_msg91_configured():
+        return {"success": False, "message": "MSG91 is not configured"}
+
+    mobile = _normalize_phone_for_msg91(phone)
+    try:
+        res = requests.post(
+            f"{MSG91_BASE_URL}/api/v5/otp/verify",
+            params={
+                "mobile": mobile,
+                "otp": otp,
+                "authkey": MSG91_AUTH_KEY,
+            },
+            timeout=10,
+        )
+        payload = res.json()
+        if res.status_code != 200:
+            logger.warning("MSG91 verify OTP failed: status=%s body=%s", res.status_code, payload)
+            return {"success": False, "message": payload.get("message") or "OTP verification failed"}
+
+        return {
+            "success": payload.get("type") == "success",
+            "message": payload.get("message", "OTP verified"),
+        }
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("MSG91 verify OTP request failed: %s", exc)
+        return {"success": False, "message": "Unable to verify OTP right now"}
 
 def _build_hms_management_token() -> str:
     """Returns a usable 100ms management token from env configuration."""
@@ -209,12 +282,22 @@ def create_100ms_session(call_id: str, call_type: str):
 # ─── AUTH ──────────────────────────────────────────────
 @api_router.post("/auth/send-otp")
 async def send_otp(req: OTPRequest):
-    # Mocked OTP - always sends 1234
-    return {"success": True, "message": "OTP sent (mocked: use 1234)"}
+    if is_msg91_configured():
+        msg91_res = send_msg91_otp(req.phone)
+        if not msg91_res["success"]:
+            raise HTTPException(status_code=502, detail=msg91_res["message"])
+        return {"success": True, "message": "OTP sent"}
+
+    # Fallback OTP for local/dev setups without MSG91 config
+    return {"success": True, "message": "OTP sent (mocked: use 1234)", "mock_otp": "1234"}
 
 @api_router.post("/auth/verify-otp")
 async def verify_otp(req: OTPVerify):
-    if req.otp != "1234":
+    if is_msg91_configured():
+        verification = verify_msg91_otp(req.phone, req.otp)
+        if not verification["success"]:
+            raise HTTPException(status_code=400, detail=verification["message"])
+    elif req.otp != "1234":
         raise HTTPException(status_code=400, detail="Invalid OTP")
 
     # Check if user already exists by phone number (any role)
