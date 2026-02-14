@@ -1,0 +1,168 @@
+{
+  "identity": {
+    "name": "E1",
+    "persona": "The Anti-AI Designer",
+    "mission": "Create a 'Digital Verandah' - warm, safe, and human.",
+    "core_principles": [
+      "No Generic 'Dating App' Vibes - It's a companionship marketplace.",
+      "Softness Over Sexiness - Use pastels, rounded corners, and warm tones.",
+      "Safety First - Visual cues of trust (shields, verified badges) are central.",
+      "Native First - Touch targets must be 48px+. Animations must be 60fps."
+    ]
+  },
+  "technical_stack": {
+    "framework": "React Native Expo",
+    "styling": "NativeWind (Tailwind CSS for Native)",
+    "icons": "@expo/vector-icons",
+    "animation": "react-native-reanimated",
+    "fonts": "expo-font"
+  },
+  "theme": {
+    "name": "Soft Pastel & Friendly",
+    "mode": "light",
+    "palette": {
+      "primary": {
+        "DEFAULT": "#FF8FA3",
+        "foreground": "#FFFFFF",
+        "description": "Soft Coral - Warm, inviting, non-threatening."
+      },
+      "secondary": {
+        "DEFAULT": "#A2E3C4",
+        "foreground": "#1A4D2E",
+        "description": "Mint Teal - Safe, calm, growth."
+      },
+      "accent": {
+        "DEFAULT": "#F6E05E",
+        "foreground": "#744210",
+        "description": "Marigold - Indian context, festive but subtle."
+      },
+      "background": {
+        "DEFAULT": "#FFFBF0",
+        "paper": "#FFFFFF",
+        "description": "Warm Cream - Avoid clinical white."
+      },
+      "text": {
+        "primary": "#2D3748",
+        "secondary": "#718096",
+        "muted": "#A0AEC0"
+      },
+      "status": {
+        "success": "#48BB78",
+        "warning": "#ED8936",
+        "error": "#F56565"
+      }
+    },
+    "typography": {
+      "headings": {
+        "family": "Nunito",
+        "weights": ["600", "700"],
+        "sizes": {
+          "h1": "text-3xl",
+          "h2": "text-2xl",
+          "h3": "text-xl"
+        }
+      },
+      "body": {
+        "family": "Mulish",
+        "weights": ["400", "500", "600"],
+        "sizes": {
+          "base": "text-base",
+          "sm": "text-sm",
+          "xs": "text-xs"
+        }
+      }
+    },
+    "radius": {
+      "base": "rounded-xl",
+      "lg": "rounded-2xl",
+      "full": "rounded-full"
+    }
+  },
+  "layout_strategy": {
+    "spacing": {
+      "container": "px-4",
+      "section": "py-6",
+      "gap": "gap-4"
+    },
+    "safe_area": "Use react-native-safe-area-context",
+    "bottom_nav": "Height 60-80px, floating effect or solid warm background"
+  },
+  "components": {
+    "Button": {
+      "base": "flex-row items-center justify-center rounded-full px-6 py-4 active:opacity-90",
+      "variants": {
+        "default": "bg-[#FF8FA3] shadow-sm",
+        "outline": "border-2 border-[#FF8FA3] bg-transparent",
+        "ghost": "bg-transparent",
+        "secondary": "bg-[#A2E3C4]"
+      },
+      "text": "font-bold text-white text-base"
+    },
+    "Card": {
+      "base": "bg-white rounded-2xl p-4 shadow-sm border border-stone-100",
+      "hover": "active:scale-[0.98] transition-transform"
+    },
+    "Input": {
+      "base": "bg-white border border-stone-200 rounded-xl px-4 py-3 text-stone-800 focus:border-[#FF8FA3]",
+      "label": "text-sm font-semibold text-stone-600 mb-1"
+    }
+  },
+  "assets": {
+    "icons": {
+      "library": "Ionicons or MaterialCommunityIcons",
+      "mapping": {
+        "home": "home-variant",
+        "voice": "microphone",
+        "wallet": "wallet-outline",
+        "profile": "account-circle-outline",
+        "shield": "shield-check-outline",
+        "heart": "heart-outline",
+        "close": "close-circle-outline"
+      }
+    },
+    "images": {
+      "listeners": [
+        {
+          "url": "https://images.unsplash.com/photo-1639120653716-a53f88afeccc?crop=entropy&cs=srgb&fm=jpg&q=85",
+          "description": "3D Female Avatar 1 - Friendly, Pink Hair",
+          "category": "listener_avatar"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1634896941598-b6b500a502a7?crop=entropy&cs=srgb&fm=jpg&q=85",
+          "description": "3D Female Avatar 2 - Professional, Tan",
+          "category": "listener_avatar"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1634926878768-2a5b3c42f139?crop=entropy&cs=srgb&fm=jpg&q=85",
+          "description": "3D Female Avatar 3 - Casual, Yellow Shirt",
+          "category": "listener_avatar"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1638012107344-3ed0f994d8d7?crop=entropy&cs=srgb&fm=jpg&q=85",
+          "description": "3D Female Avatar 4 - Artistic, Flower",
+          "category": "listener_avatar"
+        }
+      ],
+      "placeholders": {
+        "user_default": "https://ui-avatars.com/api/?name=User&background=A2E3C4&color=fff&rounded=true",
+        "banner": "https://images.unsplash.com/photo-1516542076529-1ea3854896f2?auto=format&fit=crop&q=80"
+      }
+    }
+  },
+  "instructions_to_main_agent": [
+    "1. SETUP NATIVEWIND: Since this is a React Native project, you MUST set up NativeWind if not present. Run 'npm install nativewind tailwindcss' and configure 'tailwind.config.js'.",
+    "2. SETUP FONTS: Use 'expo-font' to load Nunito (Headings) and Mulish (Body). Do not use system fonts.",
+    "3. NAVIGATION: Use 'expo-router'. Create a file-based routing structure.",
+    "4. MOCKED FLOWS: Implement dummy logic for OTP (any 4 digits work), Voice Call (simulate connection + timer), and Payments (simulate success).",
+    "5. DATA-TESTID: Every interactive element (Button, TouchableOpacity, TextInput) MUST have a 'testID' prop (React Native uses testID, not data-testid). Format: 'screen-element-action'.",
+    "6. STYLING: Use 'className' prop for styling. Example: <View className='flex-1 bg-[#FFFBF0]'>.",
+    "7. SAFETY CUES: Always display a 'Shield' icon or 'Verified' badge on Listener profiles."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "You tend to use 'Inter' font. STOP. Use 'Nunito' for this friendly app.",
+    "Do not use dark mode by default. Tier 2/3 users often prefer high-contrast light modes.",
+    "Avoid 'Gradient Overload'. Use solid pastel backgrounds.",
+    "For 'Talk Now', use a pulsing animation (scale 1 -> 1.1 -> 1) using react-native-reanimated.",
+    "Use 'SafeAreaView' from 'react-native-safe-area-context' for all screens."
+  ]
+}
