@@ -13,7 +13,6 @@ export default function LoginScreen() {
   const router = useRouter();
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
-  const [role, setRole] = useState<'seeker' | 'listener'>('seeker');
   const [step, setStep] = useState<'phone' | 'otp'>('phone');
   const [loading, setLoading] = useState(false);
 
@@ -33,13 +32,21 @@ export default function LoginScreen() {
     if (otp.length !== 4) return Alert.alert('Error', 'Enter 4-digit OTP');
     setLoading(true);
     try {
-      const res = await api.post('/auth/verify-otp', { phone: `+91${phone}`, otp, role });
+      const res = await api.post('/auth/verify-otp', { phone: `+91${phone}`, otp });
       api.setToken(res.token);
       await saveUser(res.user);
-      if (!res.user.onboarded) {
-        router.replace(role === 'seeker' ? '/onboarding/seeker' : '/onboarding/listener');
+
+      if (res.needs_gender) {
+        // First time user - ask gender
+        router.replace('/auth/gender');
       } else {
-        router.replace(role === 'seeker' ? '/seeker/home' : '/listener/dashboard');
+        // Returning user - route based on role
+        const role = res.user.role;
+        if (!res.user.onboarded) {
+          router.replace(role === 'seeker' ? '/onboarding/seeker' : '/onboarding/listener');
+        } else {
+          router.replace(role === 'seeker' ? '/seeker/home' : '/listener/dashboard');
+        }
       }
     } catch (e: any) {
       Alert.alert('Error', e.message);
@@ -59,7 +66,7 @@ export default function LoginScreen() {
           </TouchableOpacity>
 
           <View style={styles.header}>
-            <Text style={styles.title}>{step === 'phone' ? 'Welcome Back' : 'Enter OTP'}</Text>
+            <Text style={styles.title}>{step === 'phone' ? 'Welcome' : 'Enter OTP'}</Text>
             <Text style={styles.subtitle}>
               {step === 'phone'
                 ? 'Sign in with your phone number'
@@ -69,26 +76,6 @@ export default function LoginScreen() {
 
           {step === 'phone' && (
             <>
-              <Text style={styles.label}>I am a</Text>
-              <View style={styles.roleRow}>
-                <TouchableOpacity
-                  testID="role-seeker-btn"
-                  style={[styles.roleBtn, role === 'seeker' && styles.roleBtnActive]}
-                  onPress={() => setRole('seeker')}
-                >
-                  <Ionicons name="person" size={20} color={role === 'seeker' ? '#fff' : '#FF8FA3'} />
-                  <Text style={[styles.roleText, role === 'seeker' && styles.roleTextActive]}>Seeker</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  testID="role-listener-btn"
-                  style={[styles.roleBtn, role === 'listener' && styles.roleBtnActive]}
-                  onPress={() => setRole('listener')}
-                >
-                  <Ionicons name="headset" size={20} color={role === 'listener' ? '#fff' : '#A2E3C4'} />
-                  <Text style={[styles.roleText, role === 'listener' && styles.roleTextActive]}>Listener</Text>
-                </TouchableOpacity>
-              </View>
-
               <Text style={styles.label}>Phone Number</Text>
               <View style={styles.phoneRow}>
                 <View style={styles.countryCode}>
@@ -169,11 +156,6 @@ const styles = StyleSheet.create({
   title: { fontSize: 28, fontWeight: '700', color: '#2D3748' },
   subtitle: { fontSize: 14, color: '#718096', marginTop: 6 },
   label: { fontSize: 13, fontWeight: '600', color: '#4A5568', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 },
-  roleRow: { flexDirection: 'row', gap: 12, marginBottom: 24 },
-  roleBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, borderRadius: 16, backgroundColor: '#fff', borderWidth: 2, borderColor: '#E2E8F0' },
-  roleBtnActive: { backgroundColor: '#FF8FA3', borderColor: '#FF8FA3' },
-  roleText: { fontSize: 15, fontWeight: '600', color: '#4A5568' },
-  roleTextActive: { color: '#fff' },
   phoneRow: { flexDirection: 'row', gap: 10, marginBottom: 24 },
   countryCode: { backgroundColor: '#fff', borderRadius: 14, paddingHorizontal: 14, justifyContent: 'center', borderWidth: 1, borderColor: '#E2E8F0' },
   countryText: { fontSize: 15, color: '#2D3748', fontWeight: '500' },
