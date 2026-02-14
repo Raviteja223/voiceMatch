@@ -37,7 +37,10 @@ class OTPRequest(BaseModel):
 class OTPVerify(BaseModel):
     phone: str
     otp: str
-    role: str  # seeker or listener
+    role: Optional[str] = None  # optional - determined by gender for new users
+
+class SetGenderRequest(BaseModel):
+    gender: str  # male or female
 
 class SeekerOnboard(BaseModel):
     name: str
