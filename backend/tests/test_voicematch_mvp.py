@@ -2,8 +2,19 @@ import pytest
 import requests
 import os
 import time
+from pathlib import Path
 
-BASE_URL = os.environ.get('EXPO_PUBLIC_BACKEND_URL', '').rstrip('/')
+# Load BASE_URL from frontend env file
+def get_base_url():
+    frontend_env = Path('/app/frontend/.env')
+    if frontend_env.exists():
+        with open(frontend_env) as f:
+            for line in f:
+                if line.startswith('EXPO_PUBLIC_BACKEND_URL='):
+                    return line.split('=', 1)[1].strip().strip('"')
+    return 'https://voicematch-21.preview.emergentagent.com'
+
+BASE_URL = get_base_url()
 
 # ─── AUTH & ONBOARDING TESTS ───────────────────────────
 
