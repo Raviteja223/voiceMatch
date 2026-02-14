@@ -24,12 +24,6 @@ export default function SeekerProfile() {
     <SafeAreaView style={styles.container} testID="seeker-profile-screen">
       <Text style={styles.title}>Profile</Text>
       <View style={styles.card}>
-        <TouchableOpacity testID="admin-link" style={styles.menuItem} onPress={() => router.push('/admin')}>
-          <Ionicons name="shield" size={22} color="#BB8FCE" />
-          <Text style={styles.menuText}>Admin Panel</Text>
-          <Ionicons name="chevron-forward" size={18} color="#A0AEC0" />
-        </TouchableOpacity>
-        <View style={styles.divider} />
         <TouchableOpacity testID="about-link" style={styles.menuItem}>
           <Ionicons name="information-circle" size={22} color="#85C1E9" />
           <Text style={styles.menuText}>About VoiceMatch</Text>
