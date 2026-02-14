@@ -121,23 +121,42 @@ async def send_otp(req: OTPRequest):
 async def verify_otp(req: OTPVerify):
     if req.otp != "1234":
         raise HTTPException(status_code=400, detail="Invalid OTP")
-    if req.role not in ["seeker", "listener", "admin"]:
-        raise HTTPException(status_code=400, detail="Invalid role")
 
-    user = await db.users.find_one({"phone": req.phone, "role": req.role}, {"_id": 0})
-    if not user:
+    # Check if user already exists by phone number (any role)
+    user = await db.users.find_one({"phone": req.phone}, {"_id": 0})
+    if user:
+        # Existing user - return with their role
+        token = create_token(user["id"], user.get("role", ""))
+        return {"success": True, "token": token, "user": user, "needs_gender": False}
+    else:
+        # New user - create without role, needs gender selection
         user_id = uid()
         user = {
             "id": user_id,
             "phone": req.phone,
-            "role": req.role,
+            "role": "",
+            "gender": "",
             "onboarded": False,
             "created_at": now()
         }
         await db.users.insert_one(user)
         user.pop("_id", None)
-    token = create_token(user["id"], user["role"])
-    return {"success": True, "token": token, "user": user}
+        token = create_token(user_id, "")
+        return {"success": True, "token": token, "user": user, "needs_gender": True}
+
+@api_router.post("/auth/set-gender")
+async def set_gender(req: SetGenderRequest, user=Depends(get_current_user)):
+    if req.gender not in ["male", "female"]:
+        raise HTTPException(status_code=400, detail="Gender must be male or female")
+    role = "seeker" if req.gender == "male" else "listener"
+    await db.users.update_one(
+        {"id": user["user_id"]},
+        {"$set": {"gender": req.gender, "role": role}}
+    )
+    updated_user = await db.users.find_one({"id": user["user_id"]}, {"_id": 0})
+    # Generate new token with role
+    token = create_token(user["user_id"], role)
+    return {"success": True, "token": token, "user": updated_user}
 
 # ─── SEEKER ────────────────────────────────────────────
 @api_router.post("/seekers/onboard")
