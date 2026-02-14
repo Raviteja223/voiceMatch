@@ -12,6 +12,7 @@ import uuid
 import jwt
 import random
 from datetime import datetime, timezone, timedelta
+import requests
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -23,6 +24,9 @@ db = client[os.environ['DB_NAME']]
 JWT_SECRET = "voicematch-secret-key-2024"
 JWT_ALGORITHM = "HS256"
 security = HTTPBearer(auto_error=False)
+HMS_TEMPLATE_ID = os.getenv("HMS_TEMPLATE_ID", "")
+HMS_MANAGEMENT_TOKEN = os.getenv("HMS_MANAGEMENT_TOKEN", "")
+HMS_API_BASE = os.getenv("HMS_API_BASE", "https://api.100ms.live/v2")
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -110,6 +114,72 @@ def now():
 
 def uid():
     return str(uuid.uuid4())
+
+def create_100ms_session(call_id: str, call_type: str):
+    """Create a 100ms room code + auth token if keys are configured.
+
+    Fallback to None when env vars are missing or external API fails so
+    the existing mocked call flow keeps working.
+    """
+    if not HMS_TEMPLATE_ID or not HMS_MANAGEMENT_TOKEN:
+        logger.info("100ms keys not configured; continuing with simulated call flow")
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {HMS_MANAGEMENT_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    room_name = f"voicematch-{call_type}-{call_id[:8]}"
+
+    try:
+        # 1) Create room from template
+        room_res = requests.post(
+            f"{HMS_API_BASE}/rooms",
+            headers=headers,
+            json={
+                "name": room_name,
+                "description": "VoiceMatch call room",
+                "template_id": HMS_TEMPLATE_ID,
+            },
+            timeout=10,
+        )
+        room_res.raise_for_status()
+        room_data = room_res.json()
+        room_id = room_data.get("id")
+
+        # 2) Create room code (works for prebuilt flow and quick join links)
+        code_res = requests.post(
+            f"{HMS_API_BASE}/room-codes/room/{room_id}",
+            headers=headers,
+            timeout=10,
+        )
+        code_res.raise_for_status()
+        code_data = code_res.json()
+
+        # 3) Create auth token for SDK-based join flow
+        token_res = requests.post(
+            f"{HMS_API_BASE}/room-tokens",
+            headers=headers,
+            json={
+                "room_id": room_id,
+                "role": "host",
+                "user_id": f"vm-{call_id}",
+            },
+            timeout=10,
+        )
+        token_res.raise_for_status()
+        token_data = token_res.json()
+
+        return {
+            "room_id": room_id,
+            "room_name": room_name,
+            "room_code": code_data.get("code"),
+            "auth_token": token_data.get("token"),
+            "enabled": True,
+        }
+    except requests.RequestException as exc:
+        logger.warning("100ms room setup failed: %s", exc)
+        return None
 
 # ─── AUTH ──────────────────────────────────────────────
 @api_router.post("/auth/send-otp")
@@ -322,6 +392,10 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
     }
     await db.calls.insert_one(call)
     call.pop("_id", None)
+    hms_session = create_100ms_session(call_id=call_id, call_type=req.call_type)
+    if hms_session:
+        await db.calls.update_one({"id": call_id}, {"$set": {"hms": hms_session}})
+        call["hms"] = hms_session
     await db.listener_profiles.update_one(
         {"user_id": req.listener_id}, {"$set": {"in_call": True}}
     )
