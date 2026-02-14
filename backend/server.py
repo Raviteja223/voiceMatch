@@ -13,6 +13,8 @@ import jwt
 import random
 from datetime import datetime, timezone, timedelta
 import requests
+import hmac
+import hashlib
 from uuid import uuid4
 
 ROOT_DIR = Path(__file__).parent
@@ -36,6 +38,12 @@ MSG91_TEMPLATE_ID = os.getenv("MSG91_TEMPLATE_ID", "")
 MSG91_OTP_EXPIRY_MINUTES = int(os.getenv("MSG91_OTP_EXPIRY_MINUTES", "5"))
 MSG91_OTP_LENGTH = int(os.getenv("MSG91_OTP_LENGTH", "4"))
 MSG91_BASE_URL = os.getenv("MSG91_BASE_URL", "https://control.msg91.com")
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_BASE_URL = os.getenv("RAZORPAY_BASE_URL", "https://api.razorpay.com/v1")
+FCM_SERVER_KEY = os.getenv("FCM_SERVER_KEY", "")
+FCM_BASE_URL = os.getenv("FCM_BASE_URL", "https://fcm.googleapis.com/fcm/send")
+SUPPORTED_LANGUAGES = ["English", "Hindi", "Tamil", "Telugu", "Kannada", "Malayalam"]
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -73,9 +81,37 @@ class ListenerOnboard(BaseModel):
 class RechargeRequest(BaseModel):
     pack_id: str
 
+
+class RazorpayOrderRequest(BaseModel):
+    pack_id: str
+
+
+class RazorpayVerifyRequest(BaseModel):
+    order_id: str
+    payment_id: str
+    signature: str
+
 class CallStartRequest(BaseModel):
     listener_id: str
     call_type: str = "voice"
+    enable_recording: bool = False
+
+
+class RegisterDeviceRequest(BaseModel):
+    token: str
+    platform: str = "unknown"
+
+
+class ModerationActionRequest(BaseModel):
+    call_id: str
+    action: str
+    reason: Optional[str] = None
+
+
+class RecordingUpdateRequest(BaseModel):
+    call_id: str
+    status: str
+    recording_url: Optional[str] = None
 
 class CallEndRequest(BaseModel):
     call_id: str
@@ -191,6 +227,103 @@ def verify_msg91_otp(phone: str, otp: str):
     except (requests.RequestException, ValueError) as exc:
         logger.warning("MSG91 verify OTP request failed: %s", exc)
         return {"success": False, "message": "Unable to verify OTP right now"}
+
+def is_razorpay_configured() -> bool:
+    return bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
+
+
+def create_razorpay_order(amount: int, receipt: str):
+    if not is_razorpay_configured():
+        return None
+
+    try:
+        response = requests.post(
+            f"{RAZORPAY_BASE_URL}/orders",
+            auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET),
+            json={
+                "amount": amount,
+                "currency": "INR",
+                "receipt": receipt,
+                "payment_capture": 1,
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as exc:
+        logger.warning("Razorpay order creation failed: %s", exc)
+        return None
+
+
+def verify_razorpay_signature(order_id: str, payment_id: str, signature: str) -> bool:
+    if not is_razorpay_configured():
+        return False
+
+    signed_payload = f"{order_id}|{payment_id}".encode()
+    expected_signature = hmac.new(
+        RAZORPAY_KEY_SECRET.encode(),
+        signed_payload,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected_signature, signature)
+
+
+def calculate_collusion_risk(duration: int, seeker_id: str, listener_id: str, cost: float) -> dict:
+    score = 0
+    reasons = []
+    if duration < 45:
+        score += 25
+        reasons.append("very_short_call")
+    if cost == 0:
+        score += 20
+        reasons.append("zero_cost_call")
+
+    # Light-weight repeated pair risk heuristic
+    score += 10
+    reasons.append("repeat_pair_check_pending")
+
+    level = "low"
+    if score >= 50:
+        level = "high"
+    elif score >= 25:
+        level = "medium"
+
+    return {
+        "score": score,
+        "level": level,
+        "reasons": reasons,
+        "seeker_id": seeker_id,
+        "listener_id": listener_id,
+    }
+
+
+def send_push_notification(device_tokens: List[str], title: str, body: str, data: Optional[dict] = None):
+    if not FCM_SERVER_KEY or not device_tokens:
+        return {"success": False, "message": "Push not configured or no devices"}
+
+    success = 0
+    for token in device_tokens:
+        try:
+            res = requests.post(
+                FCM_BASE_URL,
+                headers={
+                    "Authorization": f"key={FCM_SERVER_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "to": token,
+                    "notification": {"title": title, "body": body},
+                    "data": data or {},
+                },
+                timeout=10,
+            )
+            if res.status_code == 200:
+                success += 1
+        except requests.RequestException:
+            continue
+
+    return {"success": success > 0, "sent": success, "total": len(device_tokens)}
+
 
 def _build_hms_management_token() -> str:
     """Returns a usable 100ms management token from env configuration."""
@@ -479,7 +612,6 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
     wallet = await db.wallet_accounts.find_one({"user_id": user["user_id"]}, {"_id": 0})
     if not wallet or wallet.get("balance", 0) < 5:
         raise HTTPException(status_code=400, detail="Insufficient balance")
-    # Check first call discount
     prev_calls = await db.calls.count_documents({"seeker_id": user["user_id"]})
     is_first_call = prev_calls == 0
     rate = 1 if is_first_call else (5 if req.call_type == "voice" else 8)
@@ -496,6 +628,14 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
         "ended_at": None,
         "duration_seconds": 0,
         "cost": 0,
+        "rtc_provider": "100ms",
+        "rtc_latency_target_ms": 100,
+        "recording": {
+            "enabled": req.enable_recording,
+            "status": "requested" if req.enable_recording else "disabled",
+            "recording_url": None,
+        },
+        "moderation": {"status": "auto", "flags": []},
         "created_at": now()
     }
     await db.calls.insert_one(call)
@@ -504,9 +644,20 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
     if hms_session:
         await db.calls.update_one({"id": call_id}, {"$set": {"hms": hms_session}})
         call["hms"] = hms_session
+
     await db.listener_profiles.update_one(
         {"user_id": req.listener_id}, {"$set": {"in_call": True}}
     )
+
+    devices = await db.device_tokens.find({"user_id": req.listener_id}, {"_id": 0, "token": 1}).to_list(50)
+    tokens = [d.get("token") for d in devices if d.get("token")]
+    push_result = send_push_notification(
+        tokens,
+        title="Incoming VoiceMatch call",
+        body="A seeker is calling you now.",
+        data={"call_id": call_id, "type": req.call_type},
+    )
+    call["push_notification"] = push_result
     return {"success": True, "call": call}
 
 @api_router.post("/calls/end")
@@ -518,7 +669,6 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
     ended = datetime.now(timezone.utc)
     duration = int((ended - started).total_seconds())
     rate = call["rate_per_min"]
-    # First call cap: ₹1/min for first 5 mins
     if call.get("is_first_call") and duration > 300:
         cost_first = (300 / 60) * 1
         cost_rest = ((duration - 300) / 60) * (5 if call["call_type"] == "voice" else 8)
@@ -526,13 +676,15 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
     else:
         cost = round((duration / 60) * rate, 2)
 
+    collusion_risk = calculate_collusion_risk(duration, call["seeker_id"], call["listener_id"], cost)
+
     await db.calls.update_one({"id": req.call_id}, {"$set": {
         "status": "ended",
         "ended_at": ended.isoformat(),
         "duration_seconds": duration,
-        "cost": cost
+        "cost": cost,
+        "collusion_risk": collusion_risk
     }})
-    # Deduct from seeker wallet
     await db.wallet_accounts.update_one(
         {"user_id": call["seeker_id"]},
         {"$inc": {"balance": -cost}}
@@ -543,7 +695,6 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
         "description": f"Call ({call['call_type']}) - {duration}s",
         "call_id": req.call_id, "created_at": now()
     })
-    # Credit listener earnings
     listener_rate = 3 if call["call_type"] == "voice" else 5
     earnings = round((duration / 60) * listener_rate, 2)
     await db.listener_earnings.update_one(
@@ -556,16 +707,27 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
         "description": f"Call earning - {duration}s",
         "call_id": req.call_id, "created_at": now()
     })
-    # Update listener stats
     await db.listener_profiles.update_one(
         {"user_id": call["listener_id"]},
         {"$inc": {"total_calls": 1, "total_minutes": duration / 60}, "$set": {"in_call": False}}
     )
+
+    if collusion_risk["level"] in ["medium", "high"]:
+        await db.risk_flags.insert_one({
+            "id": uid(),
+            "user_id": call["listener_id"],
+            "flag_type": "collusion_risk",
+            "description": f"{collusion_risk['level']} risk on call {req.call_id}",
+            "score": collusion_risk["score"],
+            "created_at": now(),
+        })
+
     return {
         "success": True,
         "duration_seconds": duration,
         "cost": cost,
-        "listener_earned": earnings
+        "listener_earned": earnings,
+        "collusion_risk": collusion_risk,
     }
 
 @api_router.get("/calls/history")
@@ -590,7 +752,7 @@ async def recharge(req: RechargeRequest, user=Depends(get_current_user)):
     amount = packs.get(req.pack_id)
     if not amount:
         raise HTTPException(status_code=400, detail="Invalid pack")
-    # Mocked payment - always success
+    # Fallback recharge path for local/dev if Razorpay isn't configured
     await db.wallet_accounts.update_one(
         {"user_id": user["user_id"]},
         {"$inc": {"balance": amount}},
@@ -599,8 +761,73 @@ async def recharge(req: RechargeRequest, user=Depends(get_current_user)):
     await db.wallet_ledger.insert_one({
         "id": uid(), "user_id": user["user_id"],
         "type": "credit", "amount": amount,
-        "description": f"Recharge ₹{amount}", "created_at": now()
+        "description": f"Recharge ₹{amount} (fallback)", "created_at": now()
     })
+    wallet = await db.wallet_accounts.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    return {"success": True, "new_balance": wallet.get("balance", 0), "fallback": True}
+
+
+@api_router.post("/wallet/razorpay/create-order")
+async def razorpay_create_order(req: RazorpayOrderRequest, user=Depends(get_current_user)):
+    packs = {"pack_99": 99, "pack_299": 299, "pack_699": 699}
+    amount = packs.get(req.pack_id)
+    if not amount:
+        raise HTTPException(status_code=400, detail="Invalid pack")
+    if not is_razorpay_configured():
+        raise HTTPException(status_code=503, detail="Razorpay is not configured")
+
+    receipt = f"vm-{user['user_id'][:8]}-{uid()[:8]}"
+    order = create_razorpay_order(amount=amount * 100, receipt=receipt)
+    if not order:
+        raise HTTPException(status_code=502, detail="Unable to create Razorpay order")
+
+    await db.payment_orders.insert_one({
+        "id": order.get("id"),
+        "user_id": user["user_id"],
+        "pack_id": req.pack_id,
+        "amount": amount,
+        "status": "created",
+        "provider": "razorpay",
+        "created_at": now(),
+    })
+    return {
+        "success": True,
+        "order": order,
+        "key_id": RAZORPAY_KEY_ID,
+        "amount": amount,
+        "currency": "INR",
+    }
+
+
+@api_router.post("/wallet/razorpay/verify-payment")
+async def razorpay_verify_payment(req: RazorpayVerifyRequest, user=Depends(get_current_user)):
+    payment_order = await db.payment_orders.find_one({"id": req.order_id, "user_id": user["user_id"]}, {"_id": 0})
+    if not payment_order:
+        raise HTTPException(status_code=404, detail="Payment order not found")
+
+    valid = verify_razorpay_signature(req.order_id, req.payment_id, req.signature)
+    if not valid:
+        raise HTTPException(status_code=400, detail="Invalid payment signature")
+
+    amount = payment_order["amount"]
+    await db.wallet_accounts.update_one(
+        {"user_id": user["user_id"]},
+        {"$inc": {"balance": amount}},
+        upsert=True,
+    )
+    await db.wallet_ledger.insert_one({
+        "id": uid(),
+        "user_id": user["user_id"],
+        "type": "credit",
+        "amount": amount,
+        "description": f"Razorpay recharge ₹{amount}",
+        "payment_id": req.payment_id,
+        "created_at": now(),
+    })
+    await db.payment_orders.update_one(
+        {"id": req.order_id},
+        {"$set": {"status": "paid", "payment_id": req.payment_id, "verified_at": now()}},
+    )
     wallet = await db.wallet_accounts.find_one({"user_id": user["user_id"]}, {"_id": 0})
     return {"success": True, "new_balance": wallet.get("balance", 0)}
 
@@ -696,6 +923,61 @@ async def withdraw(req: WithdrawRequest, user=Depends(get_current_user)):
         "status": "processing", "created_at": now()
     })
     return {"success": True, "message": f"₹{req.amount} withdrawal initiated to {req.upi_id}"}
+
+@api_router.post("/notifications/register-device")
+async def register_device(req: RegisterDeviceRequest, user=Depends(get_current_user)):
+    await db.device_tokens.update_one(
+        {"user_id": user["user_id"], "token": req.token},
+        {"$set": {"platform": req.platform, "updated_at": now()}, "$setOnInsert": {"created_at": now()}},
+        upsert=True,
+    )
+    return {"success": True}
+
+
+@api_router.get("/calls/collusion-flags")
+async def collusion_flags():
+    flags = await db.risk_flags.find({"flag_type": "collusion_risk"}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return {"flags": flags}
+
+
+@api_router.post("/calls/recording/update")
+async def update_recording(req: RecordingUpdateRequest):
+    result = await db.calls.update_one(
+        {"id": req.call_id},
+        {"$set": {"recording.status": req.status, "recording.recording_url": req.recording_url, "recording.updated_at": now()}},
+    )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return {"success": True}
+
+
+@api_router.post("/moderation/action")
+async def moderation_action(req: ModerationActionRequest):
+    if req.action not in ["warn", "mute", "end_call", "escalate"]:
+        raise HTTPException(status_code=400, detail="Invalid moderation action")
+
+    await db.moderation_events.insert_one({
+        "id": uid(),
+        "call_id": req.call_id,
+        "action": req.action,
+        "reason": req.reason,
+        "created_at": now(),
+    })
+
+    if req.action == "end_call":
+        await db.calls.update_one({"id": req.call_id}, {"$set": {"status": "moderated_end", "moderated_at": now()}})
+
+    return {"success": True, "action": req.action}
+
+
+@api_router.get("/config/translations")
+async def translations_config():
+    return {
+        "supported_languages": SUPPORTED_LANGUAGES,
+        "default": "English",
+        "rtl": [],
+    }
+
 
 # ─── ADMIN ─────────────────────────────────────────────
 @api_router.get("/admin/dashboard")

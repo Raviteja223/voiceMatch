@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, TouchableOpacity, Animated, Dimensions } from '
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useI18n, AppLanguage } from '../src/i18n';
 
 const { width } = Dimensions.get('window');
 
@@ -11,6 +12,7 @@ export default function WelcomeScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const { t, setLanguage, language } = useI18n();
 
   useEffect(() => {
     Animated.parallel([
@@ -61,6 +63,13 @@ export default function WelcomeScreen() {
         </View>
 
         <View style={styles.bottomSection}>
+          <View style={styles.langRow}>
+            {([['en','EN'], ['hi','हिं'], ['ta','த'], ['te','తె'], ['kn','ಕ'], ['ml','മ']] as [AppLanguage, string][]).map(([code, label]) => (
+              <TouchableOpacity key={code} style={[styles.langChip, language === code && styles.langChipActive]} onPress={() => setLanguage(code)}>
+                <Text style={[styles.langChipText, language === code && styles.langChipTextActive]}>{label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
           <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
             <TouchableOpacity
               testID="get-started-btn"
@@ -69,7 +78,7 @@ export default function WelcomeScreen() {
               activeOpacity={0.85}
             >
               <Ionicons name="chatbubble-ellipses" size={22} color="#fff" />
-              <Text style={styles.primaryBtnText}>Get Started</Text>
+              <Text style={styles.primaryBtnText}>{t('getStarted')}</Text>
             </TouchableOpacity>
           </Animated.View>
           <Text style={styles.disclaimer}>18+ only · Respectful conversations only</Text>
@@ -109,4 +118,9 @@ const styles = StyleSheet.create({
   },
   primaryBtnText: { fontSize: 17, fontWeight: '700', color: '#fff' },
   disclaimer: { fontSize: 12, color: '#A0AEC0', marginTop: 14 },
+  langRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginBottom: 12 },
+  langChip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14, backgroundColor: '#fff' },
+  langChipActive: { backgroundColor: '#FF8FA3' },
+  langChipText: { color: '#4A5568', fontWeight: '600', fontSize: 12 },
+  langChipTextActive: { color: '#fff' },
 });

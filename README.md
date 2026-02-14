@@ -102,3 +102,59 @@ MSG91_BASE_URL=https://control.msg91.com
 ```
 
 Without `MSG91_AUTH_KEY` + `MSG91_TEMPLATE_ID`, the app stays in mock OTP mode (`1234`).
+
+---
+
+## 6) Razorpay Configuration
+
+To enable real payments (instead of fallback mocked recharge), add:
+
+```env
+RAZORPAY_KEY_ID=rzp_live_xxx
+RAZORPAY_KEY_SECRET=xxx
+# Optional
+RAZORPAY_BASE_URL=https://api.razorpay.com/v1
+```
+
+New APIs:
+- `POST /api/wallet/razorpay/create-order`
+- `POST /api/wallet/razorpay/verify-payment`
+
+---
+
+## 7) Push Notifications (Incoming Calls)
+
+Configure FCM to send incoming call notifications to listener devices:
+
+```env
+FCM_SERVER_KEY=your_fcm_server_key
+# Optional
+FCM_BASE_URL=https://fcm.googleapis.com/fcm/send
+```
+
+New API:
+- `POST /api/notifications/register-device`
+
+---
+
+## 8) Call Recording, Moderation, and Anti-collusion
+
+- Call start supports `enable_recording` and stores recording state.
+- Moderation actions supported via `POST /api/moderation/action`.
+- Collusion risk score is computed at call end and can be listed with `GET /api/calls/collusion-flags`.
+- Recording state callbacks can be posted to `POST /api/calls/recording/update`.
+
+---
+
+## 9) Multi-language Support
+
+Frontend includes a lightweight runtime language switcher with support for:
+- English
+- Hindi
+- Tamil
+- Telugu
+- Kannada
+- Malayalam
+
+Backend language config endpoint:
+- `GET /api/config/translations`
