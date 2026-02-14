@@ -12,6 +12,8 @@ import uuid
 import jwt
 import random
 from datetime import datetime, timezone, timedelta
+import requests
+from uuid import uuid4
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -23,6 +25,12 @@ db = client[os.environ['DB_NAME']]
 JWT_SECRET = "voicematch-secret-key-2024"
 JWT_ALGORITHM = "HS256"
 security = HTTPBearer(auto_error=False)
+HMS_TEMPLATE_ID = os.getenv("HMS_TEMPLATE_ID", "")
+HMS_MANAGEMENT_TOKEN = os.getenv("HMS_MANAGEMENT_TOKEN", "")
+HMS_ACCESS_KEY = os.getenv("HMS_ACCESS_KEY", "")
+HMS_SECRET_KEY = os.getenv("HMS_SECRET_KEY", "")
+HMS_API_BASE = os.getenv("HMS_API_BASE", "https://api.100ms.live/v2")
+HMS_TOKEN_ROLE = os.getenv("HMS_TOKEN_ROLE", "host")
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -110,6 +118,93 @@ def now():
 
 def uid():
     return str(uuid.uuid4())
+
+def _build_hms_management_token() -> str:
+    """Returns a usable 100ms management token from env configuration."""
+    if HMS_MANAGEMENT_TOKEN:
+        return HMS_MANAGEMENT_TOKEN
+
+    if HMS_ACCESS_KEY and HMS_SECRET_KEY:
+        issued_at = int(datetime.now(timezone.utc).timestamp())
+        payload = {
+            "access_key": HMS_ACCESS_KEY,
+            "type": "management",
+            "version": 2,
+            "iat": issued_at,
+            "nbf": issued_at,
+            "exp": issued_at + 24 * 60 * 60,
+            "jti": str(uuid4()),
+        }
+        return jwt.encode(payload, HMS_SECRET_KEY, algorithm="HS256")
+
+    return ""
+
+
+def create_100ms_session(call_id: str, call_type: str):
+    """Create a 100ms room + room code + room token for the call."""
+    if not HMS_TEMPLATE_ID:
+        logger.info("HMS_TEMPLATE_ID missing; continuing with simulated call flow")
+        return None
+
+    management_token = _build_hms_management_token()
+    if not management_token:
+        logger.info("100ms credentials missing; set HMS_MANAGEMENT_TOKEN or HMS_ACCESS_KEY/HMS_SECRET_KEY")
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {management_token}",
+        "Content-Type": "application/json",
+    }
+    room_name = f"voicematch-{call_type}-{call_id[:8]}"
+
+    try:
+        room_res = requests.post(
+            f"{HMS_API_BASE}/rooms",
+            headers=headers,
+            json={
+                "name": room_name,
+                "description": "VoiceMatch call room",
+                "template_id": HMS_TEMPLATE_ID,
+            },
+            timeout=10,
+        )
+        room_res.raise_for_status()
+        room_id = room_res.json().get("id")
+        if not room_id:
+            logger.warning("100ms room setup failed: room id missing in response")
+            return None
+
+        code_res = requests.post(
+            f"{HMS_API_BASE}/room-codes/room/{room_id}",
+            headers=headers,
+            timeout=10,
+        )
+        code_res.raise_for_status()
+        room_code = code_res.json().get("code")
+
+        token_res = requests.post(
+            f"{HMS_API_BASE}/room-tokens",
+            headers=headers,
+            json={
+                "room_id": room_id,
+                "role": HMS_TOKEN_ROLE,
+                "user_id": f"vm-{call_id}",
+            },
+            timeout=10,
+        )
+        token_res.raise_for_status()
+        auth_token = token_res.json().get("token")
+
+        return {
+            "room_id": room_id,
+            "room_name": room_name,
+            "room_code": room_code,
+            "auth_token": auth_token,
+            "enabled": True,
+        }
+    except requests.RequestException as exc:
+        logger.warning("100ms room setup failed: %s", exc)
+        return None
 
 # ─── AUTH ──────────────────────────────────────────────
 @api_router.post("/auth/send-otp")
@@ -322,6 +417,10 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
     }
     await db.calls.insert_one(call)
     call.pop("_id", None)
+    hms_session = create_100ms_session(call_id=call_id, call_type=req.call_type)
+    if hms_session:
+        await db.calls.update_one({"id": call_id}, {"$set": {"hms": hms_session}})
+        call["hms"] = hms_session
     await db.listener_profiles.update_one(
         {"user_id": req.listener_id}, {"$set": {"in_call": True}}
     )
