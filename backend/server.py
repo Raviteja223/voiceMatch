@@ -253,21 +253,16 @@ async def seeker_onboard(req: SeekerOnboard, user=Depends(get_current_user)):
     await db.seeker_profiles.update_one(
         {"user_id": user["user_id"]}, {"$set": profile}, upsert=True
     )
-    # Create wallet
+    # Create wallet with zero balance
     existing_wallet = await db.wallet_accounts.find_one({"user_id": user["user_id"]})
     if not existing_wallet:
         await db.wallet_accounts.insert_one({
             "user_id": user["user_id"],
-            "balance": 50,  # Welcome bonus
+            "balance": 0,
             "created_at": now()
         })
-        await db.wallet_ledger.insert_one({
-            "id": uid(), "user_id": user["user_id"],
-            "type": "credit", "amount": 50,
-            "description": "Welcome bonus", "created_at": now()
-        })
     await db.users.update_one({"id": user["user_id"]}, {"$set": {"onboarded": True, "name": req.name}})
-    return {"success": True, "message": "Onboarding complete", "welcome_credits": 50}
+    return {"success": True, "message": "Onboarding complete"}
 
 @api_router.get("/seekers/profile")
 async def get_seeker_profile(user=Depends(get_current_user)):
