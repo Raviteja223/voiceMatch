@@ -46,8 +46,7 @@
           "photosPermission": "Upload ID documents for KYC verification",
           "cameraPermission": "Take photos for KYC and selfie verification"
         }
-      ],
-      "expo-screen-capture"
+      ]
     ],
     "experiments": {
       "typedRoutes": true
