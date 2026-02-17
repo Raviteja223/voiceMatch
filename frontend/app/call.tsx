@@ -7,6 +7,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import api from '../src/api';
 import { AVATAR_COLORS } from '../src/store';
+import { t } from '../src/i18n';
 
 const { width } = Dimensions.get('window');
 
@@ -25,20 +26,31 @@ export default function CallScreen() {
   const [hmsConnected, setHmsConnected] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isSpeaker, setIsSpeaker] = useState(false);
+  const [connectingDots, setConnectingDots] = useState('');
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const connectAnim = useRef(new Animated.Value(0)).current;
 
   const colors = AVATAR_COLORS[listenerAvatar || 'avatar_1'] || AVATAR_COLORS.avatar_1;
 
   useEffect(() => {
-    startCall();
+    // Connecting animation
     Animated.loop(
       Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.15, duration: 800, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
+        Animated.timing(connectAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
+        Animated.timing(connectAnim, { toValue: 0, duration: 1000, useNativeDriver: true }),
       ])
     ).start();
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    // Dots animation
+    dotsRef.current = setInterval(() => {
+      setConnectingDots(prev => prev.length >= 3 ? '' : prev + '.');
+    }, 500);
+    startCall();
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (dotsRef.current) clearInterval(dotsRef.current);
+    };
   }, []);
 
   const startCall = async () => {
@@ -50,28 +62,30 @@ export default function CallScreen() {
       if (res.success) {
         setCallId(res.call.id);
         setRatePerMin(res.call.rate_per_min);
-
-        // 100ms room info
         if (res.call.hms_room_id) {
           setHmsRoomId(res.call.hms_room_id);
           setHmsConnected(true);
-          // In a native build, you'd join the 100ms room here:
-          // await hmsInstance.join({ authToken: res.call.hms_token, ... })
         }
-
-        // Start call timer (billing runs regardless of RTC status)
+        // Simulate connection delay (3-5 seconds connecting UI)
         setTimeout(() => {
+          if (dotsRef.current) clearInterval(dotsRef.current);
           setStatus('active');
+          // Start pulse animation for active call
+          Animated.loop(
+            Animated.sequence([
+              Animated.timing(pulseAnim, { toValue: 1.15, duration: 800, useNativeDriver: true }),
+              Animated.timing(pulseAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
+            ])
+          ).start();
           timerRef.current = setInterval(() => {
             setSeconds(prev => {
               const newSec = prev + 1;
-              // Billing: free under 5s, full first minute then per-second
               if (newSec <= 5) {
                 setCost(0);
               } else {
                 const effectiveRate = res.call.rate_per_min;
                 if (newSec <= 60) {
-                  setCost(effectiveRate); // Full first minute charge
+                  setCost(effectiveRate);
                 } else {
                   setCost(Math.round((effectiveRate + ((newSec - 60) / 60) * effectiveRate) * 100) / 100);
                 }
@@ -79,7 +93,7 @@ export default function CallScreen() {
               return newSec;
             });
           }, 1000);
-        }, 2000);
+        }, 3500);
       }
     } catch (e: any) {
       Alert.alert('Error', e.message);
@@ -91,15 +105,11 @@ export default function CallScreen() {
     if (timerRef.current) clearInterval(timerRef.current);
     setStatus('ended');
     try {
-      // In native build: await hmsInstance.leave();
       const res = await api.post('/calls/end', { call_id: callId });
       router.replace({
         pathname: '/rating',
         params: {
-          callId,
-          listenerId,
-          listenerName,
-          listenerAvatar,
+          callId, listenerId, listenerName, listenerAvatar,
           duration: String(res.duration_seconds || seconds),
           cost: String(res.cost || cost),
         },
@@ -115,16 +125,58 @@ export default function CallScreen() {
     return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
   };
 
+  // CONNECTING SCREEN
+  if (status === 'connecting') {
+    return (
+      <SafeAreaView style={[styles.connectingContainer, { backgroundColor: colors.bg }]} testID="call-connecting-screen">
+        <View style={styles.connectingContent}>
+          <Text style={styles.connectingTitle}>{t('connecting')}{connectingDots}</Text>
+
+          <Animated.View style={[styles.connectingAvatarRing, {
+            borderColor: colors.accent,
+            opacity: Animated.add(0.5, Animated.multiply(connectAnim, 0.5)),
+            transform: [{ scale: Animated.add(1, Animated.multiply(connectAnim, 0.1)) }],
+          }]}>
+            <View style={[styles.connectingAvatar, { backgroundColor: '#fff' }]}>
+              <Text style={styles.connectingEmoji}>{colors.emoji}</Text>
+            </View>
+          </Animated.View>
+
+          <Text style={styles.connectingName}>{listenerName || 'Listener'}</Text>
+          <View style={styles.connectingShield}>
+            <Ionicons name="shield-checkmark" size={14} color="#A2E3C4" />
+            <Text style={styles.connectingShieldText}>{t('verified_listener')}</Text>
+          </View>
+
+          <View style={styles.connectingWaves}>
+            {[0, 1, 2].map(i => (
+              <Animated.View
+                key={i}
+                style={[styles.wave, {
+                  backgroundColor: colors.accent,
+                  opacity: Animated.add(0.2, Animated.multiply(connectAnim, 0.3)),
+                  transform: [{ scale: Animated.add(1 + i * 0.3, Animated.multiply(connectAnim, 0.2)) }],
+                }]}
+              />
+            ))}
+          </View>
+
+          <TouchableOpacity testID="cancel-connecting-btn" style={styles.cancelBtn} onPress={() => router.back()}>
+            <Text style={styles.cancelText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ACTIVE CALL SCREEN
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]} testID="call-screen">
       <View style={styles.content}>
-        {/* Status bar */}
         <View style={styles.topBar}>
           <View style={styles.statusPill}>
-            <View style={[styles.statusDot, status === 'active' && styles.activeDot]} />
-            <Text style={styles.statusText}>
-              {status === 'connecting' ? 'Connecting...' : status === 'active' ? 'Connected' : 'Call Ended'}
-            </Text>
+            <View style={[styles.statusDot, styles.activeDot]} />
+            <Text style={styles.statusText}>{t('connected')}</Text>
           </View>
           <View style={styles.topRight}>
             {hmsConnected && (
@@ -135,15 +187,14 @@ export default function CallScreen() {
             )}
             {ratePerMin === 1 && (
               <View style={styles.discountPill}>
-                <Text style={styles.discountText}>First Call ₹1/min!</Text>
+                <Text style={styles.discountText}>{t('first_call_discount')}</Text>
               </View>
             )}
           </View>
         </View>
 
-        {/* Avatar */}
         <View style={styles.avatarSection}>
-          <Animated.View style={[styles.avatarRing, { borderColor: colors.accent, transform: [{ scale: status === 'active' ? pulseAnim : 1 }] }]}>
+          <Animated.View style={[styles.avatarRing, { borderColor: colors.accent, transform: [{ scale: pulseAnim }] }]}>
             <View style={[styles.avatarCircle, { backgroundColor: '#fff' }]}>
               <Text style={styles.avatarEmoji}>{colors.emoji}</Text>
             </View>
@@ -151,72 +202,70 @@ export default function CallScreen() {
           <Text style={styles.callerName}>{listenerName || 'Listener'}</Text>
           <View style={styles.shieldRow}>
             <Ionicons name="shield-checkmark" size={14} color="#A2E3C4" />
-            <Text style={styles.shieldText}>Verified Listener</Text>
+            <Text style={styles.shieldText}>{t('verified_listener')}</Text>
           </View>
         </View>
 
-        {/* Timer & Cost */}
         <View style={styles.timerSection}>
           <Text style={styles.timer} testID="call-timer">{formatTime(seconds)}</Text>
-          <Text style={styles.costDisplay} testID="call-cost">₹{cost.toFixed(1)} spent</Text>
+          <Text style={styles.costDisplay} testID="call-cost">
+            {seconds <= 5 ? t('free_under_5s') : `₹${cost.toFixed(1)} ${t('spent')}`}
+          </Text>
           <Text style={styles.rateDisplay}>{callType === 'video' ? '₹8' : `₹${ratePerMin}`}/min</Text>
+          {seconds <= 5 && seconds > 0 && (
+            <View style={styles.freeBadge}><Ionicons name="gift" size={12} color="#48BB78" /><Text style={styles.freeText}>Free trial: {5 - seconds}s left</Text></View>
+          )}
         </View>
 
-        {/* Controls */}
         <View style={styles.controls}>
-          <TouchableOpacity
-            testID="mute-btn"
-            style={[styles.controlBtn, isMuted && styles.controlBtnActive]}
-            onPress={() => setIsMuted(!isMuted)}
-          >
+          <TouchableOpacity testID="mute-btn" style={[styles.controlBtn, isMuted && styles.controlBtnActive]} onPress={() => setIsMuted(!isMuted)}>
             <Ionicons name={isMuted ? 'mic-off' : 'mic'} size={24} color={isMuted ? '#fff' : '#4A5568'} />
-            <Text style={[styles.controlLabel, isMuted && styles.controlLabelActive]}>{isMuted ? 'Unmute' : 'Mute'}</Text>
+            <Text style={[styles.controlLabel, isMuted && styles.controlLabelActive]}>{isMuted ? t('unmute') : t('mute')}</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            testID="speaker-btn"
-            style={[styles.controlBtn, isSpeaker && styles.controlBtnActive]}
-            onPress={() => setIsSpeaker(!isSpeaker)}
-          >
+          <TouchableOpacity testID="speaker-btn" style={[styles.controlBtn, isSpeaker && styles.controlBtnActive]} onPress={() => setIsSpeaker(!isSpeaker)}>
             <Ionicons name={isSpeaker ? 'volume-high' : 'volume-medium'} size={24} color={isSpeaker ? '#fff' : '#4A5568'} />
-            <Text style={[styles.controlLabel, isSpeaker && styles.controlLabelActive]}>Speaker</Text>
+            <Text style={[styles.controlLabel, isSpeaker && styles.controlLabelActive]}>{t('speaker')}</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            testID="report-btn"
-            style={styles.controlBtn}
-            onPress={() => Alert.alert('Report', 'Report this listener?', [
-              { text: 'Cancel' },
-              { text: 'Report', style: 'destructive', onPress: async () => {
-                try {
-                  await api.post('/reports/submit', {
-                    reported_user_id: listenerId,
-                    call_id: callId,
-                    reason: 'Inappropriate behavior',
-                  });
-                  Alert.alert('Reported', 'Thank you for reporting. We will review.');
-                } catch (err) {}
-              }},
-            ])}
-          >
+          <TouchableOpacity testID="report-btn" style={styles.controlBtn} onPress={() => Alert.alert(t('report'), 'Report this listener?', [
+            { text: 'Cancel' },
+            { text: t('report'), style: 'destructive', onPress: async () => {
+              try {
+                await api.post('/reports/submit', { reported_user_id: listenerId, call_id: callId, reason: 'Inappropriate behavior' });
+                Alert.alert('Reported', 'Thank you. We will review.');
+              } catch (err) {}
+            }},
+          ])}>
             <Ionicons name="flag" size={24} color="#F56565" />
-            <Text style={styles.controlLabel}>Report</Text>
+            <Text style={styles.controlLabel}>{t('report')}</Text>
           </TouchableOpacity>
         </View>
 
-        {/* End Call */}
-        <TouchableOpacity
-          testID="end-call-btn"
-          style={styles.endCallBtn}
-          onPress={endCall}
-          activeOpacity={0.85}
-        >
+        <TouchableOpacity testID="end-call-btn" style={styles.endCallBtn} onPress={endCall} activeOpacity={0.85}>
           <Ionicons name="call" size={28} color="#fff" style={{ transform: [{ rotate: '135deg' }] }} />
         </TouchableOpacity>
+
+        <Text style={styles.recordingNote}>Calls are recorded for safety</Text>
       </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  // Connecting screen styles
+  connectingContainer: { flex: 1 },
+  connectingContent: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 },
+  connectingTitle: { fontSize: 20, fontWeight: '600', color: '#4A5568', marginBottom: 40, width: 200, textAlign: 'center' },
+  connectingAvatarRing: { width: 160, height: 160, borderRadius: 80, borderWidth: 4, alignItems: 'center', justifyContent: 'center' },
+  connectingAvatar: { width: 130, height: 130, borderRadius: 65, alignItems: 'center', justifyContent: 'center' },
+  connectingEmoji: { fontSize: 60 },
+  connectingName: { fontSize: 24, fontWeight: '700', color: '#2D3748', marginTop: 24 },
+  connectingShield: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 8 },
+  connectingShieldText: { fontSize: 12, color: '#718096', fontWeight: '500' },
+  connectingWaves: { position: 'absolute', alignItems: 'center', justifyContent: 'center' },
+  wave: { position: 'absolute', width: 200, height: 200, borderRadius: 100 },
+  cancelBtn: { position: 'absolute', bottom: 60, paddingHorizontal: 32, paddingVertical: 12, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.6)' },
+  cancelText: { fontSize: 15, fontWeight: '600', color: '#4A5568' },
+  // Active call styles
   container: { flex: 1 },
   content: { flex: 1, alignItems: 'center', justifyContent: 'space-between', paddingVertical: 20, paddingHorizontal: 24 },
   topBar: { flexDirection: 'row', width: '100%', justifyContent: 'space-between', alignItems: 'center' },
@@ -240,6 +289,8 @@ const styles = StyleSheet.create({
   timer: { fontSize: 48, fontWeight: '800', color: '#2D3748', letterSpacing: 2 },
   costDisplay: { fontSize: 16, fontWeight: '600', color: '#FF8FA3', marginTop: 4 },
   rateDisplay: { fontSize: 12, color: '#718096', marginTop: 2 },
+  freeBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#E6FFED', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, marginTop: 8 },
+  freeText: { fontSize: 11, fontWeight: '600', color: '#48BB78' },
   controls: { flexDirection: 'row', gap: 32 },
   controlBtn: { alignItems: 'center', gap: 6, width: 60, paddingVertical: 10, borderRadius: 16 },
   controlBtnActive: { backgroundColor: '#4A5568' },
@@ -250,4 +301,5 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     shadowColor: '#F56565', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.4, shadowRadius: 12, elevation: 6,
   },
+  recordingNote: { fontSize: 10, color: '#A0AEC0' },
 });
