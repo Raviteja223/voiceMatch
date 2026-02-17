@@ -996,6 +996,102 @@ async def check_referral_activation(listener_id: str):
         })
         logger.info(f"Referral activated: {referral['referred_name']} → bonus ₹{bonus} to {referral['referrer_name']}")
 
+# ─── KYC VERIFICATION ─────────────────────────────────
+@api_router.post("/kyc/submit")
+async def submit_kyc(req: KYCSubmitRequest, user=Depends(get_current_user)):
+    if user["role"] != "listener":
+        raise HTTPException(status_code=403, detail="Listeners only")
+    existing = await db.kyc_submissions.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    if existing and existing.get("status") == "verified":
+        raise HTTPException(status_code=400, detail="KYC already verified")
+    kyc = {
+        "id": uid(), "user_id": user["user_id"],
+        "full_name": req.full_name,
+        "aadhaar_last4": req.aadhaar_last4,
+        "pan_number": req.pan_number,
+        "dob": req.dob,
+        "status": "submitted",
+        "submitted_at": now(),
+        "verified_at": None,
+    }
+    await db.kyc_submissions.update_one(
+        {"user_id": user["user_id"]}, {"$set": kyc}, upsert=True
+    )
+    # Update profile KYC status
+    await db.listener_profiles.update_one(
+        {"user_id": user["user_id"]}, {"$set": {"kyc_status": "submitted"}}
+    )
+    return {"success": True, "message": "KYC submitted for verification", "status": "submitted"}
+
+@api_router.get("/kyc/status")
+async def get_kyc_status(user=Depends(get_current_user)):
+    kyc = await db.kyc_submissions.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    if not kyc:
+        return {"status": "pending", "message": "KYC not submitted yet"}
+    return {"status": kyc.get("status", "pending"), "submitted_at": kyc.get("submitted_at")}
+
+# ─── SEEKER REFERRAL SYSTEM ───────────────────────────
+@api_router.get("/seeker-referral/my-code")
+async def get_seeker_referral_code(user=Depends(get_current_user)):
+    if user["role"] != "seeker":
+        raise HTTPException(status_code=403, detail="Seekers only")
+    ref = await db.seeker_referral_codes.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    if not ref:
+        profile = await db.seeker_profiles.find_one({"user_id": user["user_id"]}, {"_id": 0})
+        code = generate_referral_code(profile.get("name", "SKR") if profile else "SKR")
+        while await db.seeker_referral_codes.find_one({"code": code}):
+            code = generate_referral_code(profile.get("name", "SKR") if profile else "SKR")
+        ref = {"user_id": user["user_id"], "code": code, "created_at": now()}
+        await db.seeker_referral_codes.insert_one(ref)
+        ref.pop("_id", None)
+    total_refs = await db.seeker_referrals.count_documents({"referrer_id": user["user_id"]})
+    total_credits = await db.seeker_referrals.count_documents({"referrer_id": user["user_id"], "status": "credited"})
+    return {
+        "code": ref["code"],
+        "total_referrals": total_refs,
+        "credited_referrals": total_credits,
+        "credits_earned": total_credits * 15,
+        "credits_per_referral": 15,
+    }
+
+@api_router.post("/seeker-referral/apply")
+async def apply_seeker_referral(req: SeekerApplyReferralRequest, user=Depends(get_current_user)):
+    if user["role"] != "seeker":
+        raise HTTPException(status_code=403, detail="Seekers only")
+    existing = await db.seeker_referrals.find_one({"referred_id": user["user_id"]})
+    if existing:
+        raise HTTPException(status_code=400, detail="You already used a referral code")
+    ref_code = await db.seeker_referral_codes.find_one({"code": req.referral_code.upper()}, {"_id": 0})
+    if not ref_code:
+        raise HTTPException(status_code=404, detail="Invalid referral code")
+    if ref_code["user_id"] == user["user_id"]:
+        raise HTTPException(status_code=400, detail="Cannot use your own code")
+    # Credit ₹15 to the referrer immediately
+    await db.wallet_accounts.update_one(
+        {"user_id": ref_code["user_id"]},
+        {"$inc": {"balance": 15}}
+    )
+    await db.wallet_ledger.insert_one({
+        "id": uid(), "user_id": ref_code["user_id"],
+        "type": "credit", "amount": 15,
+        "description": "Referral bonus - friend joined", "created_at": now()
+    })
+    await db.seeker_referrals.insert_one({
+        "id": uid(), "referrer_id": ref_code["user_id"],
+        "referred_id": user["user_id"], "code_used": req.referral_code.upper(),
+        "status": "credited", "created_at": now()
+    })
+    return {"success": True, "message": "Referral applied! Your friend earned ₹15 credits."}
+
+# ─── CALL RECORDINGS ──────────────────────────────────
+@api_router.get("/recordings/list")
+async def list_recordings(user=Depends(get_current_user)):
+    recordings = await db.call_recordings.find(
+        {"$or": [{"seeker_id": user["user_id"]}, {"listener_id": user["user_id"]}]},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(50)
+    return {"recordings": recordings}
+
 # ─── ADMIN ─────────────────────────────────────────────
 @api_router.get("/admin/dashboard")
 async def admin_dashboard():
