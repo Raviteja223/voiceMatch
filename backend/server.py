@@ -1554,7 +1554,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
-    logger.info("Voice Companionship Platform API started")
+    logger.info("Konnectra API started")
     # Auto-seed on startup
     existing = await db.listener_profiles.count_documents({})
     if existing == 0:
