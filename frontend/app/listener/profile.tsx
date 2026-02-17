@@ -106,8 +106,17 @@ export default function ListenerProfile() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFBF0', paddingHorizontal: 20 },
   title: { fontSize: 22, fontWeight: '700', color: '#2D3748', marginTop: 8, marginBottom: 24 },
-  card: { backgroundColor: '#fff', borderRadius: 18, padding: 4, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 2 },
+  card: { backgroundColor: '#fff', borderRadius: 18, padding: 4, marginBottom: 16, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 2 },
   menuItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 16, gap: 12 },
   menuText: { flex: 1, fontSize: 15, fontWeight: '500', color: '#2D3748' },
+  langValue: { fontSize: 13, color: '#A2E3C4', fontWeight: '600' },
   divider: { height: 1, backgroundColor: '#F0F0F0', marginHorizontal: 16 },
+  langPicker: { paddingHorizontal: 12, paddingBottom: 8 },
+  langOption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10 },
+  langOptionActive: { backgroundColor: '#E6FFED' },
+  langOptionText: { fontSize: 14, color: '#4A5568' },
+  langOptionTextActive: { color: '#48BB78', fontWeight: '600' },
+  safetyCard: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#E6FFED', borderRadius: 12, padding: 12, marginBottom: 16 },
+  safetyText: { fontSize: 11, color: '#1A4D2E', flex: 1 },
+  version: { textAlign: 'center', color: '#A0AEC0', fontSize: 12, marginTop: 8, marginBottom: 20 },
 });
