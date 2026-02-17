@@ -104,6 +104,13 @@ class KYCSubmitRequest(BaseModel):
     pan_number: Optional[str] = None
     dob: str  # YYYY-MM-DD
 
+class KYCUploadIDRequest(BaseModel):
+    id_type: str  # aadhaar, pan, driving_license
+    id_image_base64: str  # base64 encoded image
+
+class KYCSelfieVideoRequest(BaseModel):
+    video_base64: str  # base64 encoded video or image frames
+
 # ─── HELPERS ───────────────────────────────────────────
 def create_token(user_id: str, role: str) -> str:
     payload = {
