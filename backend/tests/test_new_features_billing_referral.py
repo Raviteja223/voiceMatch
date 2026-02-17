@@ -107,6 +107,26 @@ class TestZeroBalanceOnboarding:
 class TestNewBillingLogic:
     """Test new billing: FREE if ≤5 seconds, full first minute + per-second after 60s"""
 
+    def _accept_call_as_listener(self, api_client, listener_id, call_id):
+        """Helper: log in as the listener and accept the call to transition from ringing to active"""
+        # Find the listener's phone from admin endpoint
+        admin_res = api_client.get(f"{BASE_URL}/api/admin/users")
+        users = admin_res.json()["users"]
+        listener_user = next((u for u in users if u["id"] == listener_id), None)
+        if not listener_user:
+            return
+        # Log in as the listener
+        auth_res = api_client.post(f"{BASE_URL}/api/auth/verify-otp", json={
+            "phone": listener_user["phone"],
+            "otp": "1234"
+        })
+        listener_token = auth_res.json()["token"]
+        # Accept the call
+        api_client.post(f"{BASE_URL}/api/calls/accept",
+            headers={"Authorization": f"Bearer {listener_token}"},
+            json={"call_id": call_id}
+        )
+
     def test_call_under_5_seconds_free(self, api_client):
         """Test calls ≤5 seconds are FREE (cost = 0)"""
         # Create seeker with balance
@@ -156,10 +176,13 @@ class TestNewBillingLogic:
         )
         assert call_res.status_code == 200
         call_id = call_res.json()["call"]["id"]
-        
+
+        # Accept the call as listener (transitions from ringing to active)
+        self._accept_call_as_listener(api_client, listener_id, call_id)
+
         # Wait 3 seconds (under 5 seconds threshold)
         time.sleep(3)
-        
+
         # End call
         end_res = api_client.post(f"{BASE_URL}/api/calls/end",
             headers={"Authorization": f"Bearer {token}"},
@@ -167,7 +190,7 @@ class TestNewBillingLogic:
         )
         assert end_res.status_code == 200
         end_data = end_res.json()
-        
+
         # Cost should be ₹0 for calls under 5 seconds
         assert end_data["cost"] == 0, f"Expected cost=0 for {end_data['duration_seconds']}s call, got ₹{end_data['cost']}"
         
@@ -228,17 +251,20 @@ class TestNewBillingLogic:
         call_id = call_res.json()["call"]["id"]
         rate = call_res.json()["call"]["rate_per_min"]
         is_first_call = call_res.json()["call"].get("is_first_call", False)
-        
+
+        # Accept the call as listener (transitions from ringing to active)
+        self._accept_call_as_listener(api_client, listener_id, call_id)
+
         # Wait 6 seconds (over 5 seconds, but under 60)
         time.sleep(6)
-        
+
         # End call
         end_res = api_client.post(f"{BASE_URL}/api/calls/end",
             headers={"Authorization": f"Bearer {token}"},
             json={"call_id": call_id}
         )
         end_data = end_res.json()
-        
+
         # For calls >5s but <60s: should charge full first minute
         expected_cost = 1.0 if is_first_call else rate  # First call discount or normal rate
         assert end_data["cost"] == expected_cost, f"Expected cost=₹{expected_cost} for 6s call, got ₹{end_data['cost']}"
@@ -300,7 +326,10 @@ class TestNewBillingLogic:
         call_id = call_res.json()["call"]["id"]
         rate = call_res.json()["call"]["rate_per_min"]
         is_first_call = call_res.json()["call"].get("is_first_call", False)
-        
+
+        # Accept the call as listener (transitions from ringing to active)
+        self._accept_call_as_listener(api_client, listener_id, call_id)
+
         # Wait 65 seconds (over 60 seconds)
         time.sleep(65)
         

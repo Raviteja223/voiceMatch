@@ -71,6 +71,12 @@ class CallStartRequest(BaseModel):
     listener_id: str
     call_type: str = "voice"
 
+class CallAcceptRequest(BaseModel):
+    call_id: str
+
+class CallRejectRequest(BaseModel):
+    call_id: str
+
 class CallEndRequest(BaseModel):
     call_id: str
 
@@ -652,9 +658,10 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
         "call_type": req.call_type,
         "rate_per_min": rate,
         "is_first_call": is_first_call,
-        "status": "active",
+        "status": "ringing",
         "hms_room_id": hms_room_id,
         "started_at": now(),
+        "connected_at": None,
         "ended_at": None,
         "duration_seconds": 0,
         "cost": 0,
@@ -662,20 +669,129 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
     }
     await db.calls.insert_one(call)
     call.pop("_id", None)
-    await db.listener_profiles.update_one(
-        {"user_id": req.listener_id}, {"$set": {"in_call": True}}
-    )
 
     # Return call data with 100ms token for seeker
     call["hms_token"] = seeker_hms_token
     return {"success": True, "call": call}
+
+@api_router.post("/calls/accept")
+async def accept_call(req: CallAcceptRequest, user=Depends(get_current_user)):
+    """Listener accepts an incoming call - transitions from ringing to active"""
+    if user["role"] != "listener":
+        raise HTTPException(status_code=403, detail="Listeners only")
+    call = await db.calls.find_one({"id": req.call_id}, {"_id": 0})
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    if call["listener_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Not your call")
+    if call["status"] != "ringing":
+        raise HTTPException(status_code=400, detail=f"Call is not ringing (status: {call['status']})")
+    connected_at = now()
+    await db.calls.update_one(
+        {"id": req.call_id},
+        {"$set": {"status": "active", "connected_at": connected_at}}
+    )
+    # Mark listener as in_call now that they actually accepted
+    await db.listener_profiles.update_one(
+        {"user_id": user["user_id"]}, {"$set": {"in_call": True}}
+    )
+    # Get the listener's HMS token
+    token_doc = await db.hms_call_tokens.find_one(
+        {"call_id": req.call_id, "listener_id": user["user_id"]}, {"_id": 0}
+    )
+    return {
+        "success": True,
+        "call_id": req.call_id,
+        "connected_at": connected_at,
+        "hms_token": token_doc.get("hms_token") if token_doc else None,
+        "hms_room_id": token_doc.get("hms_room_id") if token_doc else None,
+    }
+
+@api_router.post("/calls/reject")
+async def reject_call(req: CallRejectRequest, user=Depends(get_current_user)):
+    """Listener rejects an incoming call"""
+    if user["role"] != "listener":
+        raise HTTPException(status_code=403, detail="Listeners only")
+    call = await db.calls.find_one({"id": req.call_id}, {"_id": 0})
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    if call["listener_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Not your call")
+    if call["status"] != "ringing":
+        raise HTTPException(status_code=400, detail=f"Call is not ringing (status: {call['status']})")
+    await db.calls.update_one(
+        {"id": req.call_id},
+        {"$set": {"status": "rejected", "ended_at": now(), "duration_seconds": 0, "cost": 0}}
+    )
+    # Clean up HMS resources
+    if call.get("hms_room_id"):
+        await end_hms_room(call["hms_room_id"])
+        await db.hms_call_tokens.delete_many({"call_id": req.call_id})
+    return {"success": True, "message": "Call rejected"}
+
+@api_router.get("/calls/status/{call_id}")
+async def get_call_status(call_id: str, user=Depends(get_current_user)):
+    """Poll call status - used by seeker to check if listener accepted"""
+    call = await db.calls.find_one({"id": call_id}, {"_id": 0})
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return {
+        "call_id": call_id,
+        "status": call["status"],
+        "connected_at": call.get("connected_at"),
+    }
+
+@api_router.get("/calls/check-incoming")
+async def check_incoming_call(user=Depends(get_current_user)):
+    """Listener polls this to check if there's an incoming call ringing"""
+    if user["role"] != "listener":
+        raise HTTPException(status_code=403, detail="Listeners only")
+    # Find any ringing call for this listener
+    call = await db.calls.find_one(
+        {"listener_id": user["user_id"], "status": "ringing"},
+        {"_id": 0},
+        sort=[("created_at", -1)]
+    )
+    if not call:
+        return {"has_incoming": False}
+    # Get seeker name for display
+    seeker_profile = await db.seeker_profiles.find_one(
+        {"user_id": call["seeker_id"]}, {"_id": 0}
+    )
+    seeker_name = seeker_profile.get("name", "Someone") if seeker_profile else "Someone"
+    return {
+        "has_incoming": True,
+        "call_id": call["id"],
+        "caller_name": seeker_name,
+        "call_type": call.get("call_type", "voice"),
+        "started_at": call["started_at"],
+    }
 
 @api_router.post("/calls/end")
 async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
     call = await db.calls.find_one({"id": req.call_id}, {"_id": 0})
     if not call:
         raise HTTPException(status_code=404, detail="Call not found")
-    started = datetime.fromisoformat(call["started_at"])
+    # If call was never accepted (still ringing), end it with no charge
+    if call["status"] == "ringing":
+        await db.calls.update_one({"id": req.call_id}, {"$set": {
+            "status": "missed",
+            "ended_at": now(),
+            "duration_seconds": 0,
+            "cost": 0
+        }})
+        # Clean up HMS resources
+        if call.get("hms_room_id"):
+            await end_hms_room(call["hms_room_id"])
+            await db.hms_call_tokens.delete_many({"call_id": req.call_id})
+        return {"success": True, "duration_seconds": 0, "cost": 0, "listener_earned": 0}
+
+    # Use connected_at (when listener accepted) for billing, not started_at
+    connected_at_str = call.get("connected_at")
+    if connected_at_str:
+        started = datetime.fromisoformat(connected_at_str)
+    else:
+        started = datetime.fromisoformat(call["started_at"])
     ended = datetime.now(timezone.utc)
     duration = int((ended - started).total_seconds())
     rate = call["rate_per_min"]

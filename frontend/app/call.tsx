@@ -19,7 +19,7 @@ export default function CallScreen() {
 
   const [callId, setCallId] = useState('');
   const [seconds, setSeconds] = useState(0);
-  const [status, setStatus] = useState<'connecting' | 'active' | 'ended'>('connecting');
+  const [status, setStatus] = useState<'connecting' | 'ringing' | 'active' | 'ended'>('connecting');
   const [cost, setCost] = useState(0);
   const [ratePerMin, setRatePerMin] = useState(5);
   const [hmsRoomId, setHmsRoomId] = useState('');
@@ -29,8 +29,11 @@ export default function CallScreen() {
   const [connectingDots, setConnectingDots] = useState('');
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const dotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const connectAnim = useRef(new Animated.Value(0)).current;
+  const callIdRef = useRef('');
+  const rateRef = useRef(5);
 
   const colors = AVATAR_COLORS[listenerAvatar || 'avatar_1'] || AVATAR_COLORS.avatar_1;
 
@@ -50,8 +53,38 @@ export default function CallScreen() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (dotsRef.current) clearInterval(dotsRef.current);
+      if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
+
+  const startActiveCall = () => {
+    if (dotsRef.current) clearInterval(dotsRef.current);
+    if (pollRef.current) clearInterval(pollRef.current);
+    setStatus('active');
+    // Start pulse animation for active call
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 1.15, duration: 800, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
+      ])
+    ).start();
+    timerRef.current = setInterval(() => {
+      setSeconds(prev => {
+        const newSec = prev + 1;
+        if (newSec <= 5) {
+          setCost(0);
+        } else {
+          const effectiveRate = rateRef.current;
+          if (newSec <= 60) {
+            setCost(effectiveRate);
+          } else {
+            setCost(Math.round((effectiveRate + ((newSec - 60) / 60) * effectiveRate) * 100) / 100);
+          }
+        }
+        return newSec;
+      });
+    }, 1000);
+  };
 
   const startCall = async () => {
     try {
@@ -61,39 +94,50 @@ export default function CallScreen() {
       });
       if (res.success) {
         setCallId(res.call.id);
+        callIdRef.current = res.call.id;
         setRatePerMin(res.call.rate_per_min);
+        rateRef.current = res.call.rate_per_min;
         if (res.call.hms_room_id) {
           setHmsRoomId(res.call.hms_room_id);
           setHmsConnected(true);
         }
-        // Simulate connection delay (3-5 seconds connecting UI)
-        setTimeout(() => {
-          if (dotsRef.current) clearInterval(dotsRef.current);
-          setStatus('active');
-          // Start pulse animation for active call
-          Animated.loop(
-            Animated.sequence([
-              Animated.timing(pulseAnim, { toValue: 1.15, duration: 800, useNativeDriver: true }),
-              Animated.timing(pulseAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
-            ])
-          ).start();
-          timerRef.current = setInterval(() => {
-            setSeconds(prev => {
-              const newSec = prev + 1;
-              if (newSec <= 5) {
-                setCost(0);
-              } else {
-                const effectiveRate = res.call.rate_per_min;
-                if (newSec <= 60) {
-                  setCost(effectiveRate);
-                } else {
-                  setCost(Math.round((effectiveRate + ((newSec - 60) / 60) * effectiveRate) * 100) / 100);
-                }
-              }
-              return newSec;
-            });
-          }, 1000);
-        }, 3500);
+        // Transition to ringing state - waiting for listener to accept
+        setStatus('ringing');
+        // Poll backend every 2 seconds to check if listener accepted
+        pollRef.current = setInterval(async () => {
+          try {
+            const statusRes = await api.get(`/calls/status/${callIdRef.current}`);
+            if (statusRes.status === 'active') {
+              // Listener accepted! Start the active call
+              startActiveCall();
+            } else if (statusRes.status === 'rejected' || statusRes.status === 'missed' || statusRes.status === 'ended') {
+              // Listener rejected or call expired
+              if (pollRef.current) clearInterval(pollRef.current);
+              if (dotsRef.current) clearInterval(dotsRef.current);
+              Alert.alert(
+                statusRes.status === 'rejected' ? t('call_rejected') : t('call_ended'),
+                statusRes.status === 'rejected'
+                  ? t('listener_busy')
+                  : t('call_ended')
+              );
+              router.back();
+            }
+          } catch (e) {
+            // Polling error - ignore and retry
+          }
+        }, 2000);
+        // Auto-cancel after 60 seconds if listener doesn't answer
+        setTimeout(async () => {
+          if (pollRef.current) {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+            try {
+              await api.post('/calls/end', { call_id: callIdRef.current });
+            } catch (e) {}
+            Alert.alert(t('no_answer'), t('listener_no_answer'));
+            router.back();
+          }
+        }, 60000);
       }
     } catch (e: any) {
       Alert.alert('Error', e.message);
@@ -103,13 +147,15 @@ export default function CallScreen() {
 
   const endCall = async () => {
     if (timerRef.current) clearInterval(timerRef.current);
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = null;
     setStatus('ended');
     try {
-      const res = await api.post('/calls/end', { call_id: callId });
+      const res = await api.post('/calls/end', { call_id: callId || callIdRef.current });
       router.replace({
         pathname: '/rating',
         params: {
-          callId, listenerId, listenerName, listenerAvatar,
+          callId: callId || callIdRef.current, listenerId, listenerName, listenerAvatar,
           duration: String(res.duration_seconds || seconds),
           cost: String(res.cost || cost),
         },
@@ -125,12 +171,14 @@ export default function CallScreen() {
     return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
   };
 
-  // CONNECTING SCREEN
-  if (status === 'connecting') {
+  // CONNECTING / RINGING SCREEN
+  if (status === 'connecting' || status === 'ringing') {
     return (
       <SafeAreaView style={[styles.connectingContainer, { backgroundColor: colors.bg }]} testID="call-connecting-screen">
         <View style={styles.connectingContent}>
-          <Text style={styles.connectingTitle}>{t('connecting')}{connectingDots}</Text>
+          <Text style={styles.connectingTitle}>
+            {status === 'ringing' ? `${t('ringing')}${connectingDots}` : `${t('connecting')}${connectingDots}`}
+          </Text>
 
           <Animated.View style={[styles.connectingAvatarRing, {
             borderColor: colors.accent,
@@ -148,6 +196,10 @@ export default function CallScreen() {
             <Text style={styles.connectingShieldText}>{t('verified_listener')}</Text>
           </View>
 
+          {status === 'ringing' && (
+            <Text style={styles.ringingHint}>{t('waiting_for_answer')}</Text>
+          )}
+
           <View style={styles.connectingWaves}>
             {[0, 1, 2].map(i => (
               <Animated.View
@@ -161,7 +213,7 @@ export default function CallScreen() {
             ))}
           </View>
 
-          <TouchableOpacity testID="cancel-connecting-btn" style={styles.cancelBtn} onPress={() => router.back()}>
+          <TouchableOpacity testID="cancel-connecting-btn" style={styles.cancelBtn} onPress={endCall}>
             <Text style={styles.cancelText}>Cancel</Text>
           </TouchableOpacity>
         </View>
@@ -263,6 +315,7 @@ const styles = StyleSheet.create({
   connectingShieldText: { fontSize: 12, color: '#718096', fontWeight: '500' },
   connectingWaves: { position: 'absolute', alignItems: 'center', justifyContent: 'center' },
   wave: { position: 'absolute', width: 200, height: 200, borderRadius: 100 },
+  ringingHint: { fontSize: 13, color: '#718096', marginTop: 12, fontWeight: '500' },
   cancelBtn: { position: 'absolute', bottom: 60, paddingHorizontal: 32, paddingVertical: 12, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.6)' },
   cancelText: { fontSize: 15, fontWeight: '600', color: '#4A5568' },
   // Active call styles
