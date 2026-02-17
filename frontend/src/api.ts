@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = "https://voicematch.onrender.com";
 
 class ApiClient {
   private token: string | null = null;
