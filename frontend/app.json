@@ -22,7 +22,13 @@
         "backgroundColor": "#FFFBF0"
       },
       "edgeToEdgeEnabled": true,
-      "permissions": ["CAMERA", "READ_EXTERNAL_STORAGE", "RECORD_AUDIO"]
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "package": "com.raviteja_1998.konnectra"
     },
     "web": {
       "bundler": "metro",
@@ -50,6 +56,12 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "aa886407-af9a-4cfb-8bd0-4133d9d6d8b6"
+      }
     }
   }
 }

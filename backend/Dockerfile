@@ -1,9 +1,11 @@
 FROM python:3.11-slim
 
 WORKDIR /app
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
+# Install dependencies
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -13,6 +15,10 @@ ENV DB_NAME=konnectra
 ENV HMS_APP_ACCESS_KEY=6990826e6a127e1cf1254164
 ENV HMS_APP_SECRET=BNVzVYKcn2AJkNBYu1yyrshHpBlJoRzxkY2cH6XBgkPEbXQho2SWZLipCU4e4SobDbs2mShX9oN4eZFHphhbOmFfZSi9bsHq9gKpXjPBViAZf3pBXiDmtXbmHT6NE09zSyL17WXIKOB3-t8a73rO4qZQXzsEAoz50UlYFCbelwI=
 
+# Copy your backend code
+COPY . /app
+
 EXPOSE 8000
 
-CMD ["sh", "-c", "python -m uvicorn server:app --host 0.0.0.0 --port 8000 --reload"]
+# Use Render's provided PORT
+CMD ["sh", "-c", "gunicorn server:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT} --workers 2 --timeout 120"]
