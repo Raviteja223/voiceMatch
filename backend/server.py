@@ -583,6 +583,11 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
     )
     # Check if this listener's referral should be activated
     await check_referral_activation(call["listener_id"])
+    # Run anti-collusion checks
+    await run_anti_collusion_checks(call["seeker_id"], call["listener_id"], req.call_id, duration)
+    # Store call recording metadata
+    if call.get("hms_room_id"):
+        await create_call_recording_metadata(req.call_id, call["seeker_id"], call["listener_id"], call["hms_room_id"])
     # End 100ms room
     if call.get("hms_room_id"):
         await end_hms_room(call["hms_room_id"])
