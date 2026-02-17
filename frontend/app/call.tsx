@@ -21,6 +21,10 @@ export default function CallScreen() {
   const [status, setStatus] = useState<'connecting' | 'active' | 'ended'>('connecting');
   const [cost, setCost] = useState(0);
   const [ratePerMin, setRatePerMin] = useState(5);
+  const [hmsRoomId, setHmsRoomId] = useState('');
+  const [hmsConnected, setHmsConnected] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isSpeaker, setIsSpeaker] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
@@ -46,7 +50,16 @@ export default function CallScreen() {
       if (res.success) {
         setCallId(res.call.id);
         setRatePerMin(res.call.rate_per_min);
-        // Simulate connection delay
+
+        // 100ms room info
+        if (res.call.hms_room_id) {
+          setHmsRoomId(res.call.hms_room_id);
+          setHmsConnected(true);
+          // In a native build, you'd join the 100ms room here:
+          // await hmsInstance.join({ authToken: res.call.hms_token, ... })
+        }
+
+        // Start call timer (billing runs regardless of RTC status)
         setTimeout(() => {
           setStatus('active');
           timerRef.current = setInterval(() => {
@@ -68,6 +81,7 @@ export default function CallScreen() {
     if (timerRef.current) clearInterval(timerRef.current);
     setStatus('ended');
     try {
+      // In native build: await hmsInstance.leave();
       const res = await api.post('/calls/end', { call_id: callId });
       router.replace({
         pathname: '/rating',
@@ -102,11 +116,19 @@ export default function CallScreen() {
               {status === 'connecting' ? 'Connecting...' : status === 'active' ? 'Connected' : 'Call Ended'}
             </Text>
           </View>
-          {ratePerMin === 1 && (
-            <View style={styles.discountPill}>
-              <Text style={styles.discountText}>First Call ₹1/min!</Text>
-            </View>
-          )}
+          <View style={styles.topRight}>
+            {hmsConnected && (
+              <View style={styles.hmsPill} testID="hms-connected-badge">
+                <Ionicons name="radio" size={12} color="#48BB78" />
+                <Text style={styles.hmsText}>100ms</Text>
+              </View>
+            )}
+            {ratePerMin === 1 && (
+              <View style={styles.discountPill}>
+                <Text style={styles.discountText}>First Call ₹1/min!</Text>
+              </View>
+            )}
+          </View>
         </View>
 
         {/* Avatar */}
@@ -125,22 +147,46 @@ export default function CallScreen() {
 
         {/* Timer & Cost */}
         <View style={styles.timerSection}>
-          <Text style={styles.timer}>{formatTime(seconds)}</Text>
-          <Text style={styles.costDisplay}>₹{cost.toFixed(1)} spent</Text>
+          <Text style={styles.timer} testID="call-timer">{formatTime(seconds)}</Text>
+          <Text style={styles.costDisplay} testID="call-cost">₹{cost.toFixed(1)} spent</Text>
           <Text style={styles.rateDisplay}>{callType === 'video' ? '₹8' : `₹${ratePerMin}`}/min</Text>
         </View>
 
         {/* Controls */}
         <View style={styles.controls}>
-          <TouchableOpacity testID="mute-btn" style={styles.controlBtn}>
-            <Ionicons name="mic-off" size={24} color="#4A5568" />
-            <Text style={styles.controlLabel}>Mute</Text>
+          <TouchableOpacity
+            testID="mute-btn"
+            style={[styles.controlBtn, isMuted && styles.controlBtnActive]}
+            onPress={() => setIsMuted(!isMuted)}
+          >
+            <Ionicons name={isMuted ? 'mic-off' : 'mic'} size={24} color={isMuted ? '#fff' : '#4A5568'} />
+            <Text style={[styles.controlLabel, isMuted && styles.controlLabelActive]}>{isMuted ? 'Unmute' : 'Mute'}</Text>
           </TouchableOpacity>
-          <TouchableOpacity testID="speaker-btn" style={styles.controlBtn}>
-            <Ionicons name="volume-high" size={24} color="#4A5568" />
-            <Text style={styles.controlLabel}>Speaker</Text>
+          <TouchableOpacity
+            testID="speaker-btn"
+            style={[styles.controlBtn, isSpeaker && styles.controlBtnActive]}
+            onPress={() => setIsSpeaker(!isSpeaker)}
+          >
+            <Ionicons name={isSpeaker ? 'volume-high' : 'volume-medium'} size={24} color={isSpeaker ? '#fff' : '#4A5568'} />
+            <Text style={[styles.controlLabel, isSpeaker && styles.controlLabelActive]}>Speaker</Text>
           </TouchableOpacity>
-          <TouchableOpacity testID="report-btn" style={styles.controlBtn}>
+          <TouchableOpacity
+            testID="report-btn"
+            style={styles.controlBtn}
+            onPress={() => Alert.alert('Report', 'Report this listener?', [
+              { text: 'Cancel' },
+              { text: 'Report', style: 'destructive', onPress: async () => {
+                try {
+                  await api.post('/reports/submit', {
+                    reported_user_id: listenerId,
+                    call_id: callId,
+                    reason: 'Inappropriate behavior',
+                  });
+                  Alert.alert('Reported', 'Thank you for reporting. We will review.');
+                } catch (err) {}
+              }},
+            ])}
+          >
             <Ionicons name="flag" size={24} color="#F56565" />
             <Text style={styles.controlLabel}>Report</Text>
           </TouchableOpacity>
@@ -164,10 +210,13 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   content: { flex: 1, alignItems: 'center', justifyContent: 'space-between', paddingVertical: 20, paddingHorizontal: 24 },
   topBar: { flexDirection: 'row', width: '100%', justifyContent: 'space-between', alignItems: 'center' },
+  topRight: { flexDirection: 'row', gap: 6 },
   statusPill: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(255,255,255,0.6)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12 },
   statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#A0AEC0' },
   activeDot: { backgroundColor: '#48BB78' },
   statusText: { fontSize: 12, fontWeight: '600', color: '#4A5568' },
+  hmsPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#E6FFED', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  hmsText: { fontSize: 10, fontWeight: '700', color: '#48BB78' },
   discountPill: { backgroundColor: '#F6E05E', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
   discountText: { fontSize: 11, fontWeight: '700', color: '#744210' },
   avatarSection: { alignItems: 'center' },
@@ -182,8 +231,10 @@ const styles = StyleSheet.create({
   costDisplay: { fontSize: 16, fontWeight: '600', color: '#FF8FA3', marginTop: 4 },
   rateDisplay: { fontSize: 12, color: '#718096', marginTop: 2 },
   controls: { flexDirection: 'row', gap: 32 },
-  controlBtn: { alignItems: 'center', gap: 6 },
+  controlBtn: { alignItems: 'center', gap: 6, width: 60, paddingVertical: 10, borderRadius: 16 },
+  controlBtnActive: { backgroundColor: '#4A5568' },
   controlLabel: { fontSize: 11, color: '#718096', fontWeight: '500' },
+  controlLabelActive: { color: '#fff' },
   endCallBtn: {
     width: 70, height: 70, borderRadius: 35, backgroundColor: '#F56565',
     alignItems: 'center', justifyContent: 'center',
