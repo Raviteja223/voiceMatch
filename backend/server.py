@@ -375,6 +375,26 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
     is_first_call = prev_calls == 0
     rate = 1 if is_first_call else (5 if req.call_type == "voice" else 8)
     call_id = uid()
+
+    # Create 100ms room for the call
+    hms_room = await create_hms_room(f"vm-call-{call_id[:8]}")
+    hms_room_id = hms_room.get("id") if hms_room else None
+
+    # Generate 100ms tokens for both participants
+    seeker_hms_token = None
+    listener_hms_token = None
+    if hms_room_id:
+        seeker_hms_token = generate_hms_app_token(hms_room_id, user["user_id"], "host")
+        listener_hms_token = generate_hms_app_token(hms_room_id, req.listener_id, "guest")
+        # Store listener's token so they can retrieve it
+        await db.hms_call_tokens.insert_one({
+            "call_id": call_id,
+            "listener_id": req.listener_id,
+            "hms_token": listener_hms_token,
+            "hms_room_id": hms_room_id,
+            "created_at": now()
+        })
+
     call = {
         "id": call_id,
         "seeker_id": user["user_id"],
@@ -383,6 +403,7 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
         "rate_per_min": rate,
         "is_first_call": is_first_call,
         "status": "active",
+        "hms_room_id": hms_room_id,
         "started_at": now(),
         "ended_at": None,
         "duration_seconds": 0,
@@ -394,6 +415,9 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
     await db.listener_profiles.update_one(
         {"user_id": req.listener_id}, {"$set": {"in_call": True}}
     )
+
+    # Return call data with 100ms token for seeker
+    call["hms_token"] = seeker_hms_token
     return {"success": True, "call": call}
 
 @api_router.post("/calls/end")
