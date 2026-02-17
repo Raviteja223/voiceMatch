@@ -101,3 +101,170 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: Voice Companionship Platform - A voice-first paid companionship marketplace with male-only "Seekers" and female-only paid "Listeners". Features include OTP login, gender selection, role-based routing, 100ms RTC integration, credit-based billing, listener/seeker referrals, KYC verification, i18n support, and screen capture prevention.
+
+backend:
+  - task: "OTP Authentication (mocked)"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Phone OTP login flow working with mocked OTPs"
+
+  - task: "Gender Selection API"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+
+  - task: "Listener Profile & Online Status"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Heartbeat auto-online and go-offline endpoints added"
+
+  - task: "KYC Submission & Status"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "KYC submit and status endpoints implemented"
+
+  - task: "Seeker Referral System"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Seeker referral code generation and apply endpoints"
+
+  - task: "Call Start/End with 100ms"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+
+frontend:
+  - task: "Screen Capture Prevention"
+    implemented: true
+    working: true
+    file: "app/_layout.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Added expo-screen-capture to prevent screenshots/recording"
+
+  - task: "Call Connecting UI"
+    implemented: true
+    working: true
+    file: "app/call.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Connecting animation with dots and cancel button"
+
+  - task: "KYC Screen"
+    implemented: true
+    working: true
+    file: "app/listener/kyc.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Full KYC form with name, aadhaar, pan, dob fields"
+
+  - task: "i18n System"
+    implemented: true
+    working: true
+    file: "src/i18n.ts"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Multi-language support with EN, HI, TA, TE, KN, ML"
+
+  - task: "Language Selector in Profiles"
+    implemented: true
+    working: true
+    file: "app/seeker/profile.tsx, app/listener/profile.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Language picker added to both seeker and listener profiles"
+
+  - task: "Seeker Referral Screen"
+    implemented: true
+    working: true
+    file: "app/seeker/referral.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+
+  - task: "Listener Dashboard Auto-Online"
+    implemented: true
+    working: true
+    file: "app/listener/dashboard.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Heartbeat every 30s, auto go-offline on unmount"
+
+metadata:
+  created_by: "main_agent"
+  version: "1.0"
+  test_sequence: 1
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "KYC Submission & Status"
+    - "Seeker Referral System"
+    - "Listener Profile & Online Status"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: "Completed screen capture prevention, KYC screen, language selectors, and listener profile improvements. Ready for backend testing of KYC, referral, and listener heartbeat endpoints."
