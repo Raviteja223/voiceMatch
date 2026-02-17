@@ -14,7 +14,7 @@ def get_base_url():
             for line in f:
                 if line.startswith('EXPO_PUBLIC_BACKEND_URL='):
                     return line.split('=', 1)[1].strip().strip('"')
-    return 'https://voicematch-21.preview.emergentagent.com'
+    return 'https://talkbuddies-1.preview.emergentagent.com'
 
 BASE_URL = get_base_url()
 
