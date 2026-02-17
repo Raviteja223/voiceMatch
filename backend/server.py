@@ -902,12 +902,14 @@ async def submit_report(req: ReportRequest, user=Depends(get_current_user)):
     return {"success": True, "message": "Report submitted"}
 
 # ─── REFERRAL HELPERS ──────────────────────────────────
+# Referral only activates when referred listener completes 30 minutes of calls!
 REFERRAL_TIERS = {
-    "bronze": {"min_referrals": 0, "bonus": 200, "commission_rate": 0.05, "commission_days": 90},
-    "silver": {"min_referrals": 6, "bonus": 300, "commission_rate": 0.07, "commission_days": 90},
-    "gold": {"min_referrals": 16, "bonus": 500, "commission_rate": 0.10, "commission_days": 90},
+    "bronze": {"min_referrals": 0, "max_referrals": 5, "bonus": 50, "commission_rate": 0.05, "commission_days": 15},
+    "silver": {"min_referrals": 6, "max_referrals": 15, "bonus": 75, "commission_rate": 0.075, "commission_days": 15},
+    "gold": {"min_referrals": 16, "max_referrals": 25, "bonus": 100, "commission_rate": 0.10, "commission_days": 15},
 }
-REFERRAL_ACTIVATION_MINUTES = 30  # referred listener must hit 30 min talk time to activate
+REFERRAL_ACTIVATION_MINUTES = 30  # referred listener must complete 30 min talk time to activate
+MAX_TOTAL_REFERRALS = 25  # Maximum referrals allowed per listener
 
 def get_referral_tier(successful_referrals: int):
     if successful_referrals >= 16:
