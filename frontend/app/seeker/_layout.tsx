@@ -25,6 +25,7 @@ export default function SeekerLayout() {
     >
       <Tabs.Screen name="home" options={{ title: 'Home', tabBarIcon: ({ color, size }) => <Ionicons name="chatbubbles" size={size} color={color} /> }} />
       <Tabs.Screen name="wallet" options={{ title: 'Wallet', tabBarIcon: ({ color, size }) => <Ionicons name="wallet" size={size} color={color} /> }} />
+      <Tabs.Screen name="referral" options={{ title: 'Refer', tabBarIcon: ({ color, size }) => <Ionicons name="gift" size={size} color={color} /> }} />
       <Tabs.Screen name="history" options={{ title: 'History', tabBarIcon: ({ color, size }) => <Ionicons name="time" size={size} color={color} /> }} />
       <Tabs.Screen name="profile" options={{ title: 'Profile', tabBarIcon: ({ color, size }) => <Ionicons name="person" size={size} color={color} /> }} />
     </Tabs>
