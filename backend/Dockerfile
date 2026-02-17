@@ -7,8 +7,6 @@ ENV PYTHONUNBUFFERED=1
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY /app/
-
 ENV PORT=8000
 ENV MONGO_URL=mongodb+srv://Ravi:gycm4cge>@cluster0.53r8xqg.mongodb.net/?appName=Cluster0
 ENV DB_NAME=konnectra
