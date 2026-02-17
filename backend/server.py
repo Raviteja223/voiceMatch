@@ -117,6 +117,69 @@ def now():
 def uid():
     return str(uuid.uuid4())
 
+# ─── 100ms HELPERS ─────────────────────────────────────
+def generate_hms_management_token():
+    """Generate a management token for 100ms REST API calls"""
+    payload = {
+        "access_key": HMS_APP_ACCESS_KEY,
+        "type": "management",
+        "version": 2,
+        "iat": int(datetime.now(tz=timezone.utc).timestamp()),
+        "nbf": int(datetime.now(tz=timezone.utc).timestamp()),
+        "exp": int((datetime.now(tz=timezone.utc) + timedelta(hours=24)).timestamp()),
+    }
+    return jwt.encode(payload, HMS_APP_SECRET, algorithm="HS256", headers={"jti": str(uuid.uuid4())})
+
+def generate_hms_app_token(room_id: str, user_id: str, role: str = "guest"):
+    """Generate an app token for a user to join a 100ms room"""
+    payload = {
+        "access_key": HMS_APP_ACCESS_KEY,
+        "room_id": room_id,
+        "user_id": user_id,
+        "role": role,
+        "type": "app",
+        "version": 2,
+        "iat": int(datetime.now(tz=timezone.utc).timestamp()),
+        "nbf": int(datetime.now(tz=timezone.utc).timestamp()),
+        "exp": int((datetime.now(tz=timezone.utc) + timedelta(hours=1)).timestamp()),
+    }
+    return jwt.encode(payload, HMS_APP_SECRET, algorithm="HS256", headers={"jti": str(uuid.uuid4())})
+
+async def create_hms_room(room_name: str):
+    """Create a new 100ms room via REST API"""
+    try:
+        mgmt_token = generate_hms_management_token()
+        async with httpx.AsyncClient(timeout=15.0) as http_client:
+            response = await http_client.post(
+                f"{HMS_API_BASE}/rooms",
+                json={"name": room_name, "description": f"VoiceMatch call room", "region": "in"},
+                headers={"Authorization": f"Bearer {mgmt_token}", "Content-Type": "application/json"}
+            )
+            if response.status_code in (200, 201):
+                data = response.json()
+                logger.info(f"100ms room created: {data.get('id')}")
+                return data
+            else:
+                logger.error(f"100ms room creation failed: {response.status_code} - {response.text}")
+                return None
+    except Exception as e:
+        logger.error(f"100ms room creation error: {e}")
+        return None
+
+async def end_hms_room(room_id: str):
+    """Disable/end a 100ms room"""
+    try:
+        mgmt_token = generate_hms_management_token()
+        async with httpx.AsyncClient(timeout=15.0) as http_client:
+            response = await http_client.post(
+                f"{HMS_API_BASE}/rooms/{room_id}",
+                json={"enabled": False},
+                headers={"Authorization": f"Bearer {mgmt_token}", "Content-Type": "application/json"}
+            )
+            logger.info(f"100ms room ended: {room_id} - status {response.status_code}")
+    except Exception as e:
+        logger.error(f"100ms room end error: {e}")
+
 # ─── AUTH ──────────────────────────────────────────────
 @api_router.post("/auth/send-otp")
 async def send_otp(req: OTPRequest):
