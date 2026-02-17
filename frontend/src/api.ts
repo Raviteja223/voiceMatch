@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API_BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
+const API_BASE = "http://localhost:8000";
 
 class ApiClient {
   private token: string | null = null;

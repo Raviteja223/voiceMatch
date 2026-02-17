@@ -21,7 +21,7 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-JWT_SECRET = "voicematch-secret-key-2024"
+JWT_SECRET = "konnectra-secret-key-2024"
 JWT_ALGORITHM = "HS256"
 security = HTTPBearer(auto_error=False)
 
