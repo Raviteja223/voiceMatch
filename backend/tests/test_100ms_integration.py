@@ -55,7 +55,7 @@ class Test100msCallIntegration:
         assert len(call["hms_token"]) > 50, "hms_token should be a valid JWT (length > 50)"
         
         # Verify call metadata
-        assert call["status"] == "active", "Call status should be active"
+        assert call["status"] == "ringing", "Call status should be ringing"
         assert call["seeker_id"] == seeker_with_balance["user_id"], "seeker_id should match"
         assert call["listener_id"] == listener_id, "listener_id should match"
         assert call["call_type"] == "voice", "call_type should be voice"
@@ -89,13 +89,29 @@ class Test100msCallIntegration:
     
     def test_call_end_disables_100ms_room_and_billing(self, seeker_with_balance):
         """Test POST /api/calls/end disables 100ms room and calculates billing correctly"""
+        # Accept the call as listener first (transitions from ringing to active)
+        listener_id = seeker_with_balance["listener_id"]
+        admin_res = requests.get(f"{BASE_URL}/api/admin/users")
+        users = admin_res.json()["users"]
+        listener_user = next((u for u in users if u["id"] == listener_id), None)
+        if listener_user:
+            auth_res = requests.post(f"{BASE_URL}/api/auth/verify-otp",
+                headers={"Content-Type": "application/json"},
+                json={"phone": listener_user["phone"], "otp": "1234"}
+            )
+            listener_token = auth_res.json()["token"]
+            requests.post(f"{BASE_URL}/api/calls/accept",
+                headers={"Authorization": f"Bearer {listener_token}", "Content-Type": "application/json"},
+                json={"call_id": seeker_with_balance["call_id"]}
+            )
+
         # Wait a few seconds for call duration
         time.sleep(3)
-        
+
         call_id = seeker_with_balance["call_id"]
         token = seeker_with_balance["token"]
         initial_balance = seeker_with_balance["balance"]
-        
+
         response = requests.post(f"{BASE_URL}/api/calls/end",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"call_id": call_id}
@@ -160,7 +176,7 @@ class Test100msListenerToken:
         assert data["hms_room_id"] == listener_with_call["hms_room_id"], "hms_room_id should match"
         
         # Verify call is active
-        assert data["call"]["status"] == "active", "Call should be active"
+        assert data["call"]["status"] == "ringing", "Call should be ringing"
         
         print(f"✅ Listener incoming token retrieved successfully")
         print(f"✅ HMS token: {data['hms_token'][:40]}...")

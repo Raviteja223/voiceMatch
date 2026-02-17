@@ -295,7 +295,7 @@ class TestCallFlow:
         assert data["success"] is True
         assert "call" in data
         call = data["call"]
-        assert call["status"] == "active"
+        assert call["status"] == "ringing"
         assert "id" in call
         assert "rate_per_min" in call
         seeker_test_data["call_id"] = call["id"]
@@ -304,9 +304,24 @@ class TestCallFlow:
 
     def test_end_call_success(self, api_client, seeker_test_data):
         """Test ending a call and cost calculation"""
+        # Accept the call as listener (transitions from ringing to active)
+        listener_id = seeker_test_data.get("matched_listener_id", "test_listener")
+        admin_res = api_client.get(f"{BASE_URL}/api/admin/users")
+        users = admin_res.json()["users"]
+        listener_user = next((u for u in users if u["id"] == listener_id), None)
+        if listener_user:
+            auth_res = api_client.post(f"{BASE_URL}/api/auth/verify-otp", json={
+                "phone": listener_user["phone"], "otp": "1234"
+            })
+            listener_token = auth_res.json()["token"]
+            api_client.post(f"{BASE_URL}/api/calls/accept",
+                headers={"Authorization": f"Bearer {listener_token}"},
+                json={"call_id": seeker_test_data["call_id"]}
+            )
+
         # Wait a few seconds to simulate call duration
         time.sleep(3)
-        
+
         response = api_client.post(f"{BASE_URL}/api/calls/end",
             headers={"Authorization": f"Bearer {seeker_test_data['token']}"},
             json={"call_id": seeker_test_data["call_id"]}

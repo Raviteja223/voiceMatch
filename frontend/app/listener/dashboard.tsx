@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
-  ActivityIndicator, Alert, RefreshControl,
+  ActivityIndicator, Alert, RefreshControl, Modal, Animated, Vibration,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -14,6 +14,12 @@ export default function ListenerDashboard() {
   const [earnings, setEarnings] = useState<any>(null);
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [incomingCall, setIncomingCall] = useState<{
+    call_id: string; caller_name: string; call_type: string;
+  } | null>(null);
+  const [accepting, setAccepting] = useState(false);
+  const incomingPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pulseAnim = useRef(new Animated.Value(1)).current;
 
   const loadData = useCallback(async () => {
     try {
@@ -29,18 +35,90 @@ export default function ListenerDashboard() {
     setLoading(false);
   }, []);
 
+  // Poll for incoming calls every 3 seconds
+  const checkIncomingCall = useCallback(async () => {
+    try {
+      const res = await api.get('/calls/check-incoming');
+      if (res.has_incoming && res.call_id) {
+        setIncomingCall({
+          call_id: res.call_id,
+          caller_name: res.caller_name || 'Someone',
+          call_type: res.call_type || 'voice',
+        });
+        // Vibrate to alert the listener
+        Vibration.vibrate([0, 500, 200, 500]);
+      } else {
+        setIncomingCall(null);
+      }
+    } catch (e) {
+      // No incoming call or error - ignore
+    }
+  }, []);
+
+  const handleAcceptCall = async () => {
+    if (!incomingCall) return;
+    setAccepting(true);
+    try {
+      const res = await api.post('/calls/accept', { call_id: incomingCall.call_id });
+      if (res.success) {
+        setIncomingCall(null);
+        // Navigate to the call screen
+        router.push({
+          pathname: '/call',
+          params: {
+            listenerId: '', // Not needed for listener side
+            listenerName: incomingCall.caller_name,
+            listenerAvatar: 'avatar_1',
+            callType: incomingCall.call_type,
+            callId: incomingCall.call_id,
+            isListener: 'true',
+          },
+        });
+      }
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'Could not accept call');
+    }
+    setAccepting(false);
+  };
+
+  const handleRejectCall = async () => {
+    if (!incomingCall) return;
+    try {
+      await api.post('/calls/reject', { call_id: incomingCall.call_id });
+    } catch (e) {}
+    setIncomingCall(null);
+  };
+
   useEffect(() => {
     loadData();
     // Send heartbeat every 30 seconds to stay online
-    const interval = setInterval(() => {
+    const heartbeatInterval = setInterval(() => {
       api.post('/listeners/heartbeat').catch(() => {});
     }, 30000);
+    // Poll for incoming calls every 3 seconds
+    checkIncomingCall();
+    incomingPollRef.current = setInterval(checkIncomingCall, 3000);
     return () => {
-      clearInterval(interval);
+      clearInterval(heartbeatInterval);
+      if (incomingPollRef.current) clearInterval(incomingPollRef.current);
       // Go offline when leaving dashboard
       api.post('/listeners/go-offline').catch(() => {});
     };
-  }, [loadData]);
+  }, [loadData, checkIncomingCall]);
+
+  // Pulse animation for incoming call modal
+  useEffect(() => {
+    if (incomingCall) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 1.1, duration: 600, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
+        ])
+      ).start();
+    } else {
+      pulseAnim.setValue(1);
+    }
+  }, [incomingCall]);
 
   if (loading) return <SafeAreaView style={styles.container}><View style={styles.center}><ActivityIndicator size="large" color="#A2E3C4" /></View></SafeAreaView>;
 
@@ -162,6 +240,56 @@ export default function ListenerDashboard() {
           <Text style={styles.recordingText}>All calls are recorded for safety (15-day retention, encrypted)</Text>
         </View>
       </ScrollView>
+
+      {/* Incoming Call Modal */}
+      <Modal
+        visible={!!incomingCall}
+        transparent
+        animationType="slide"
+        testID="incoming-call-modal"
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.incomingCallCard}>
+            <Text style={styles.incomingLabel}>{t('incoming_call')}</Text>
+            <Animated.View style={[styles.incomingAvatarRing, { transform: [{ scale: pulseAnim }] }]}>
+              <View style={styles.incomingAvatar}>
+                <Ionicons name="person" size={40} color="#FF8FA3" />
+              </View>
+            </Animated.View>
+            <Text style={styles.incomingCallerName}>{incomingCall?.caller_name || 'Someone'}</Text>
+            <Text style={styles.incomingCallType}>
+              {incomingCall?.call_type === 'video' ? t('video_call') : t('voice_call')}
+            </Text>
+
+            <View style={styles.incomingActions}>
+              <TouchableOpacity
+                testID="reject-call-btn"
+                style={styles.rejectBtn}
+                onPress={handleRejectCall}
+              >
+                <Ionicons name="close" size={28} color="#fff" />
+                <Text style={styles.rejectText}>{t('decline')}</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                testID="accept-call-btn"
+                style={styles.acceptBtn}
+                onPress={handleAcceptCall}
+                disabled={accepting}
+              >
+                {accepting ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <>
+                    <Ionicons name="call" size={28} color="#fff" />
+                    <Text style={styles.acceptText}>{t('accept')}</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -205,4 +333,17 @@ const styles = StyleSheet.create({
   rateValue: { fontSize: 14, fontWeight: '700', color: '#2D3748', marginTop: 2 },
   recordingNotice: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 20, marginBottom: 20 },
   recordingText: { fontSize: 11, color: '#A0AEC0', flex: 1 },
+  // Incoming call modal styles
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', padding: 24 },
+  incomingCallCard: { backgroundColor: '#fff', borderRadius: 28, padding: 32, alignItems: 'center', width: '100%', maxWidth: 340, shadowColor: '#000', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.2, shadowRadius: 24, elevation: 10 },
+  incomingLabel: { fontSize: 14, fontWeight: '600', color: '#48BB78', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 20 },
+  incomingAvatarRing: { width: 100, height: 100, borderRadius: 50, borderWidth: 3, borderColor: '#48BB78', alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
+  incomingAvatar: { width: 80, height: 80, borderRadius: 40, backgroundColor: '#FFF0F3', alignItems: 'center', justifyContent: 'center' },
+  incomingCallerName: { fontSize: 22, fontWeight: '700', color: '#2D3748', marginBottom: 4 },
+  incomingCallType: { fontSize: 14, color: '#718096', fontWeight: '500', marginBottom: 28 },
+  incomingActions: { flexDirection: 'row', gap: 32 },
+  rejectBtn: { width: 70, height: 70, borderRadius: 35, backgroundColor: '#F56565', alignItems: 'center', justifyContent: 'center', shadowColor: '#F56565', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
+  rejectText: { fontSize: 10, fontWeight: '600', color: '#fff', marginTop: 2 },
+  acceptBtn: { width: 70, height: 70, borderRadius: 35, backgroundColor: '#48BB78', alignItems: 'center', justifyContent: 'center', shadowColor: '#48BB78', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
+  acceptText: { fontSize: 10, fontWeight: '600', color: '#fff', marginTop: 2 },
 });
