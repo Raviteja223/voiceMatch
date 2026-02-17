@@ -88,7 +88,7 @@ export default function SeekerProfile() {
           <Text style={styles.safetyText}>All calls are encrypted and recorded for safety (15-day retention)</Text>
         </View>
 
-        <Text style={styles.version}>VoiceMatch v1.1.0</Text>
+        <Text style={styles.version}>Konnectra v1.1.0</Text>
       </ScrollView>
     </SafeAreaView>
   );

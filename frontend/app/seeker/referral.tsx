@@ -27,7 +27,7 @@ export default function SeekerReferralScreen() {
     if (!data?.code) return;
     try {
       await Share.share({
-        message: `Join VoiceMatch and get amazing voice companions! Use my code: ${data.code} to give me ₹15 credits. Download now!`,
+        message: `Join Konnectra and get amazing voice companions! Use my code: ${data.code} to give me ₹15 credits. Download now!`,
       });
     } catch (e) {}
   };

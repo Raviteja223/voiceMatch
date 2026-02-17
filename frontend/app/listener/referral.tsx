@@ -41,7 +41,7 @@ export default function ReferralScreen() {
     if (!data?.code) return;
     try {
       await Share.share({
-        message: `Join VoiceMatch as a Listener and start earning! Use my referral code: ${data.code}\n\nEarn ₹3/min voice calls, ₹5/min video calls. Download now!`,
+        message: `Join Konnectra as a Listener and start earning! Use my referral code: ${data.code}\n\nEarn ₹3/min voice calls, ₹5/min video calls. Download now!`,
       });
     } catch (e) {}
   };
