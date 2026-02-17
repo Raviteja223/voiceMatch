@@ -871,9 +871,9 @@ async def withdraw(req: WithdrawRequest, user=Depends(get_current_user)):
     await db.withdrawals.insert_one({
         "id": uid(), "user_id": user["user_id"],
         "amount": req.amount, "upi_id": req.upi_id,
-        "status": "processing", "created_at": now()
+        "status": "completed", "created_at": now()  # Instant withdrawal
     })
-    return {"success": True, "message": f"₹{req.amount} withdrawal initiated to {req.upi_id}"}
+    return {"success": True, "message": f"₹{req.amount} withdrawn instantly to {req.upi_id}"}
 
 # ─── REFERRAL SYSTEM ──────────────────────────────────
 @api_router.get("/referral/my-code")
