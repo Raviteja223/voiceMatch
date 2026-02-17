@@ -1,82 +1,94 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
-  ActivityIndicator, Switch, Alert, RefreshControl,
+  ActivityIndicator, Alert, RefreshControl,
 } from 'react-native';
+import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import api from '../../src/api';
+import { t } from '../../src/i18n';
 
 export default function ListenerDashboard() {
+  const router = useRouter();
   const [earnings, setEarnings] = useState<any>(null);
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [isOnline, setIsOnline] = useState(false);
-  const [toggling, setToggling] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
+      // Auto-set online via heartbeat
+      api.post('/listeners/heartbeat').catch(() => {});
       const [earningsRes, profileRes] = await Promise.all([
         api.get('/earnings/dashboard'),
         api.get('/listeners/profile'),
       ]);
       setEarnings(earningsRes.earnings);
       setProfile(profileRes);
-      setIsOnline(profileRes.is_online || false);
     } catch (e) {}
     setLoading(false);
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
-
-  const toggleOnline = async (value: boolean) => {
-    setToggling(true);
-    try {
-      await api.post('/listeners/toggle-online', { online: value });
-      setIsOnline(value);
-    } catch (e: any) {
-      Alert.alert('Error', e.message);
-    }
-    setToggling(false);
-  };
+  useEffect(() => {
+    loadData();
+    // Send heartbeat every 30 seconds to stay online
+    const interval = setInterval(() => {
+      api.post('/listeners/heartbeat').catch(() => {});
+    }, 30000);
+    return () => {
+      clearInterval(interval);
+      // Go offline when leaving dashboard
+      api.post('/listeners/go-offline').catch(() => {});
+    };
+  }, [loadData]);
 
   if (loading) return <SafeAreaView style={styles.container}><View style={styles.center}><ActivityIndicator size="large" color="#A2E3C4" /></View></SafeAreaView>;
 
   const e = earnings || { total_earned: 0, pending_balance: 0, withdrawn: 0 };
+  const kycStatus = profile?.kyc_status || 'pending';
 
   return (
     <SafeAreaView style={styles.container} testID="listener-dashboard-screen">
       <ScrollView refreshControl={<RefreshControl refreshing={false} onRefresh={loadData} tintColor="#A2E3C4" />}>
         <View style={styles.header}>
           <View>
-            <Text style={styles.greeting}>Welcome back!</Text>
+            <Text style={styles.greeting}>{t('welcome_back')}</Text>
             <Text style={styles.name}>{profile?.name || 'Listener'}</Text>
           </View>
-          <View style={styles.onlineToggle}>
-            <Text style={styles.onlineLabel}>{isOnline ? 'Online' : 'Offline'}</Text>
-            <Switch
-              testID="online-toggle"
-              value={isOnline}
-              onValueChange={toggleOnline}
-              disabled={toggling}
-              trackColor={{ false: '#E2E8F0', true: '#A2E3C4' }}
-              thumbColor={isOnline ? '#fff' : '#fff'}
-            />
+          <View style={styles.onlineBadge} testID="auto-online-badge">
+            <View style={styles.greenDot} />
+            <Text style={styles.onlineText}>{t('online')}</Text>
           </View>
         </View>
 
+        {/* KYC Banner */}
+        {kycStatus !== 'verified' && (
+          <TouchableOpacity testID="kyc-banner" style={styles.kycBanner} onPress={() => router.push('/listener/kyc')}>
+            <Ionicons name="shield-half" size={20} color="#ED8936" />
+            <View style={styles.kycBannerInfo}>
+              <Text style={styles.kycBannerTitle}>
+                {kycStatus === 'submitted' ? 'KYC Under Review' : 'Complete KYC Verification'}
+              </Text>
+              <Text style={styles.kycBannerSub}>
+                {kycStatus === 'submitted' ? 'Your documents are being verified' : 'Required to receive calls and withdraw'}
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color="#ED8936" />
+          </TouchableOpacity>
+        )}
+
         {/* Earnings Summary */}
         <View style={styles.earningsCard}>
-          <Text style={styles.earningsLabel}>Pending Balance</Text>
+          <Text style={styles.earningsLabel}>{t('pending_balance')}</Text>
           <Text style={styles.earningsAmount}>₹{Math.round(e.pending_balance)}</Text>
           <View style={styles.earningsRow}>
             <View style={styles.earningsStat}>
-              <Text style={styles.statLabel}>Total Earned</Text>
+              <Text style={styles.statLabel}>{t('total_earned')}</Text>
               <Text style={styles.statValue}>₹{Math.round(e.total_earned)}</Text>
             </View>
             <View style={styles.statDivider} />
             <View style={styles.earningsStat}>
-              <Text style={styles.statLabel}>Withdrawn</Text>
+              <Text style={styles.statLabel}>{t('withdrawn')}</Text>
               <Text style={styles.statValue}>₹{Math.round(e.withdrawn)}</Text>
             </View>
           </View>
@@ -87,17 +99,17 @@ export default function ListenerDashboard() {
           <View style={styles.statCard}>
             <Ionicons name="call" size={20} color="#FF8FA3" />
             <Text style={styles.statCardValue}>{profile?.total_calls || 0}</Text>
-            <Text style={styles.statCardLabel}>Total Calls</Text>
+            <Text style={styles.statCardLabel}>{t('total_calls')}</Text>
           </View>
           <View style={styles.statCard}>
             <Ionicons name="time" size={20} color="#85C1E9" />
             <Text style={styles.statCardValue}>{Math.round(profile?.total_minutes || 0)}m</Text>
-            <Text style={styles.statCardLabel}>Talk Time</Text>
+            <Text style={styles.statCardLabel}>{t('talk_time')}</Text>
           </View>
           <View style={styles.statCard}>
             <Ionicons name="star" size={20} color="#F6E05E" />
             <Text style={styles.statCardValue}>{profile?.avg_rating?.toFixed(1) || '0'}</Text>
-            <Text style={styles.statCardLabel}>Rating</Text>
+            <Text style={styles.statCardLabel}>{t('rating')}</Text>
           </View>
         </View>
 
@@ -119,30 +131,35 @@ export default function ListenerDashboard() {
           if (e.pending_balance < 1000) {
             Alert.alert('Minimum ₹1000', `You need ₹${1000 - Math.round(e.pending_balance)} more to withdraw`);
           } else {
-            Alert.alert('Withdraw', `Withdraw ₹${Math.round(e.pending_balance)} to your UPI?`, [
+            Alert.alert('Instant Withdraw', `Withdraw ₹${Math.round(e.pending_balance)} instantly to your UPI?`, [
               { text: 'Cancel' },
-              { text: 'Withdraw', onPress: async () => {
+              { text: 'Withdraw Now', onPress: async () => {
                 try {
-                  await api.post('/earnings/withdraw', { amount: e.pending_balance, upi_id: 'demo@upi' });
-                  Alert.alert('Success', 'Withdrawal initiated!');
+                  const res = await api.post('/earnings/withdraw', { amount: e.pending_balance, upi_id: 'demo@upi' });
+                  Alert.alert('Success', res.message);
                   loadData();
                 } catch (err: any) { Alert.alert('Error', err.message); }
               }},
             ]);
           }
         }}>
-          <Ionicons name="wallet" size={20} color="#1A4D2E" />
-          <Text style={styles.withdrawText}>Withdraw to UPI</Text>
+          <Ionicons name="flash" size={20} color="#1A4D2E" />
+          <Text style={styles.withdrawText}>Instant {t('withdraw_upi')}</Text>
         </TouchableOpacity>
 
         {/* Rate Info */}
         <View style={styles.rateInfoCard}>
-          <Text style={styles.rateInfoTitle}>Your Earning Rates</Text>
+          <Text style={styles.rateInfoTitle}>{t('earning_rates')}</Text>
           <View style={styles.rateRow}>
             <View style={styles.rateItem}><Ionicons name="mic" size={16} color="#FF8FA3" /><Text style={styles.rateLabel}>Voice</Text><Text style={styles.rateValue}>₹3/min</Text></View>
             <View style={styles.rateItem}><Ionicons name="videocam" size={16} color="#BB8FCE" /><Text style={styles.rateLabel}>Video</Text><Text style={styles.rateValue}>₹5/min</Text></View>
-            <View style={styles.rateItem}><Ionicons name="timer" size={16} color="#85C1E9" /><Text style={styles.rateLabel}>Base</Text><Text style={styles.rateValue}>₹50/hr</Text></View>
           </View>
+        </View>
+
+        {/* Recording Notice */}
+        <View style={styles.recordingNotice}>
+          <Ionicons name="shield-checkmark" size={16} color="#A2E3C4" />
+          <Text style={styles.recordingText}>All calls are recorded for safety (15-day retention, encrypted)</Text>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -155,8 +172,13 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 8, paddingBottom: 16 },
   greeting: { fontSize: 13, color: '#718096', fontWeight: '500' },
   name: { fontSize: 22, fontWeight: '700', color: '#2D3748' },
-  onlineToggle: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  onlineLabel: { fontSize: 13, fontWeight: '600', color: '#4A5568' },
+  onlineBadge: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#E6FFED', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12 },
+  greenDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#48BB78' },
+  onlineText: { fontSize: 12, fontWeight: '600', color: '#48BB78' },
+  kycBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#FFF5E6', borderRadius: 14, padding: 14, marginHorizontal: 20, marginBottom: 16, borderLeftWidth: 3, borderLeftColor: '#ED8936' },
+  kycBannerInfo: { flex: 1 },
+  kycBannerTitle: { fontSize: 13, fontWeight: '700', color: '#744210' },
+  kycBannerSub: { fontSize: 11, color: '#A0AEC0', marginTop: 2 },
   earningsCard: { backgroundColor: '#A2E3C4', borderRadius: 20, padding: 24, marginHorizontal: 20, alignItems: 'center', marginBottom: 16 },
   earningsLabel: { fontSize: 13, color: '#1A4D2E', fontWeight: '500', opacity: 0.7 },
   earningsAmount: { fontSize: 40, fontWeight: '800', color: '#1A4D2E', marginTop: 4 },
@@ -175,10 +197,12 @@ const styles = StyleSheet.create({
   tierSub: { fontSize: 12, color: '#718096', marginTop: 2 },
   withdrawBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#A2E3C4', paddingVertical: 14, borderRadius: 24, marginHorizontal: 20, marginBottom: 16 },
   withdrawText: { fontSize: 15, fontWeight: '700', color: '#1A4D2E' },
-  rateInfoCard: { backgroundColor: '#fff', borderRadius: 16, padding: 16, marginHorizontal: 20, marginBottom: 20 },
+  rateInfoCard: { backgroundColor: '#fff', borderRadius: 16, padding: 16, marginHorizontal: 20, marginBottom: 16 },
   rateInfoTitle: { fontSize: 14, fontWeight: '700', color: '#2D3748', marginBottom: 12 },
   rateRow: { flexDirection: 'row', gap: 12 },
   rateItem: { flex: 1, alignItems: 'center', backgroundColor: '#FFFBF0', borderRadius: 12, padding: 10 },
   rateLabel: { fontSize: 11, color: '#718096', fontWeight: '500', marginTop: 4 },
   rateValue: { fontSize: 14, fontWeight: '700', color: '#2D3748', marginTop: 2 },
+  recordingNotice: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 20, marginBottom: 20 },
+  recordingText: { fontSize: 11, color: '#A0AEC0', flex: 1 },
 });
