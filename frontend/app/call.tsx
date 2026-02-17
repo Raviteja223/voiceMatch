@@ -65,7 +65,17 @@ export default function CallScreen() {
           timerRef.current = setInterval(() => {
             setSeconds(prev => {
               const newSec = prev + 1;
-              setCost(Math.round((newSec / 60) * res.call.rate_per_min * 100) / 100);
+              // Billing: free under 5s, full first minute then per-second
+              if (newSec <= 5) {
+                setCost(0);
+              } else {
+                const effectiveRate = res.call.rate_per_min;
+                if (newSec <= 60) {
+                  setCost(effectiveRate); // Full first minute charge
+                } else {
+                  setCost(Math.round((effectiveRate + ((newSec - 60) / 60) * effectiveRate) * 100) / 100);
+                }
+              }
               return newSec;
             });
           }, 1000);
