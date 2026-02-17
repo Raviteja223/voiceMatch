@@ -435,6 +435,111 @@ async def go_offline(user=Depends(get_current_user)):
     )
     return {"success": True, "online": False}
 
+# ─── LEADERBOARD ────────────────────────────────────────
+@api_router.get("/listeners/leaderboard")
+async def get_leaderboard(period: str = "weekly", user=Depends(get_current_user)):
+    """
+    Get listener leaderboard rankings.
+    Period can be: 'weekly', 'monthly', 'all_time'
+    Returns top 50 listeners ranked by earnings.
+    """
+    if user["role"] != "listener":
+        raise HTTPException(status_code=403, detail="Listeners only")
+    
+    # Calculate date range for period
+    now_dt = datetime.utcnow()
+    if period == "weekly":
+        start_date = now_dt - timedelta(days=7)
+    elif period == "monthly":
+        start_date = now_dt - timedelta(days=30)
+    else:
+        start_date = datetime(2020, 1, 1)  # All time
+    
+    # Get all listener profiles with stats
+    profiles = await db.listener_profiles.find({}, {"_id": 0}).to_list(500)
+    
+    # Get earnings data from listener_stats
+    stats_list = await db.listener_stats.find({}).to_list(500)
+    stats_map = {s["user_id"]: s for s in stats_list}
+    
+    # Get call data for the period
+    calls = await db.calls.find({
+        "ended_at": {"$gte": start_date.isoformat()}
+    }).to_list(10000)
+    
+    # Calculate period earnings and minutes per listener
+    period_earnings = {}
+    period_minutes = {}
+    period_calls = {}
+    
+    for call in calls:
+        listener_id = call.get("listener_id")
+        if not listener_id:
+            continue
+        if listener_id not in period_earnings:
+            period_earnings[listener_id] = 0
+            period_minutes[listener_id] = 0
+            period_calls[listener_id] = 0
+        
+        duration = call.get("duration_seconds", 0)
+        # Calculate listener earnings (₹3/min voice, ₹5/min video)
+        rate = 5 if call.get("is_video") else 3
+        earnings = (duration / 60) * rate
+        period_earnings[listener_id] += earnings
+        period_minutes[listener_id] += duration / 60
+        period_calls[listener_id] += 1
+    
+    # Build leaderboard entries
+    leaderboard = []
+    for profile in profiles:
+        user_id = profile.get("user_id")
+        stats = stats_map.get(user_id, {})
+        
+        entry = {
+            "user_id": user_id,
+            "name": profile.get("name", "Anonymous"),
+            "avatar_id": profile.get("avatar_id", "avatar_1"),
+            "is_online": profile.get("is_online", False),
+            "period_earnings": round(period_earnings.get(user_id, 0), 2),
+            "period_minutes": round(period_minutes.get(user_id, 0), 1),
+            "period_calls": period_calls.get(user_id, 0),
+            "total_earnings": stats.get("total_earnings", 0),
+            "total_minutes": stats.get("total_minutes", 0),
+            "total_calls": stats.get("total_calls", 0),
+            "average_rating": stats.get("average_rating", 0),
+            "tier": profile.get("tier", "new"),
+        }
+        leaderboard.append(entry)
+    
+    # Sort by period earnings (descending)
+    leaderboard.sort(key=lambda x: x["period_earnings"], reverse=True)
+    
+    # Add rank
+    for i, entry in enumerate(leaderboard):
+        entry["rank"] = i + 1
+    
+    # Find current user's rank
+    current_user_rank = None
+    current_user_entry = None
+    for entry in leaderboard:
+        if entry["user_id"] == user["user_id"]:
+            current_user_rank = entry["rank"]
+            current_user_entry = entry
+            break
+    
+    # Return top 50 and user's entry if not in top 50
+    top_50 = leaderboard[:50]
+    
+    return {
+        "period": period,
+        "leaderboard": top_50,
+        "total_listeners": len(leaderboard),
+        "current_user": {
+            "rank": current_user_rank,
+            "entry": current_user_entry
+        }
+    }
+
 @api_router.get("/listeners/online")
 async def get_online_listeners(user=Depends(get_current_user)):
     listeners = await db.listener_profiles.find(
