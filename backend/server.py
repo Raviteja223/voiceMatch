@@ -464,31 +464,36 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
         "duration_seconds": duration,
         "cost": cost
     }})
-    # Deduct from seeker wallet
-    await db.wallet_accounts.update_one(
-        {"user_id": call["seeker_id"]},
-        {"$inc": {"balance": -cost}}
-    )
-    await db.wallet_ledger.insert_one({
-        "id": uid(), "user_id": call["seeker_id"],
-        "type": "debit", "amount": cost,
-        "description": f"Call ({call['call_type']}) - {duration}s",
-        "call_id": req.call_id, "created_at": now()
-    })
-    # Credit listener earnings (only if call was charged)
+
+    earnings = 0
     if cost > 0:
+        # Deduct from seeker wallet
+        await db.wallet_accounts.update_one(
+            {"user_id": call["seeker_id"]},
+            {"$inc": {"balance": -cost}}
+        )
+        await db.wallet_ledger.insert_one({
+            "id": uid(), "user_id": call["seeker_id"],
+            "type": "debit", "amount": cost,
+            "description": f"Call ({call['call_type']}) - {duration}s",
+            "call_id": req.call_id, "created_at": now()
+        })
+        # Credit listener earnings
         listener_rate = 3 if call["call_type"] == "voice" else 5
         earnings = round((duration / 60) * listener_rate, 2)
-    await db.listener_earnings.update_one(
-        {"user_id": call["listener_id"]},
-        {"$inc": {"total_earned": earnings, "pending_balance": earnings}}
-    )
-    await db.listener_earnings_ledger.insert_one({
-        "id": uid(), "user_id": call["listener_id"],
-        "type": "earning", "amount": earnings,
-        "description": f"Call earning - {duration}s",
-        "call_id": req.call_id, "created_at": now()
-    })
+        await db.listener_earnings.update_one(
+            {"user_id": call["listener_id"]},
+            {"$inc": {"total_earned": earnings, "pending_balance": earnings}}
+        )
+        await db.listener_earnings_ledger.insert_one({
+            "id": uid(), "user_id": call["listener_id"],
+            "type": "earning", "amount": earnings,
+            "description": f"Call earning - {duration}s",
+            "call_id": req.call_id, "created_at": now()
+        })
+        # Check referral commission for the listener's referrer
+        await process_referral_commission(call["listener_id"], earnings)
+
     # Update listener stats
     await db.listener_profiles.update_one(
         {"user_id": call["listener_id"]},
