@@ -178,9 +178,9 @@ class Test100msListenerToken:
 
 # ─── FIXTURES ──────────────────────────────────────────
 
-@pytest.fixture
+@pytest.fixture(scope="class")
 def seeker_with_balance():
-    """Create a seeker with balance and match with listener"""
+    """Create a seeker with balance and match with listener - shared across class tests"""
     # Create seeker
     phone = f"+9199998{int(time.time()) % 100000:05d}"
     
