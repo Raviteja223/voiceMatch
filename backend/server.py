@@ -95,6 +95,15 @@ class ToggleOnlineRequest(BaseModel):
 class ApplyReferralRequest(BaseModel):
     referral_code: str
 
+class SeekerApplyReferralRequest(BaseModel):
+    referral_code: str
+
+class KYCSubmitRequest(BaseModel):
+    full_name: str
+    aadhaar_last4: str  # last 4 digits only
+    pan_number: Optional[str] = None
+    dob: str  # YYYY-MM-DD
+
 # ─── HELPERS ───────────────────────────────────────────
 def create_token(user_id: str, role: str) -> str:
     payload = {
