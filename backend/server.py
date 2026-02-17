@@ -434,13 +434,29 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
     ended = datetime.now(timezone.utc)
     duration = int((ended - started).total_seconds())
     rate = call["rate_per_min"]
-    # First call cap: ₹1/min for first 5 mins
-    if call.get("is_first_call") and duration > 300:
-        cost_first = (300 / 60) * 1
-        cost_rest = ((duration - 300) / 60) * (5 if call["call_type"] == "voice" else 8)
-        cost = round(cost_first + cost_rest, 2)
+
+    # Billing: FREE if ≤5 seconds, full first minute + per-second after 60s
+    if duration <= 5:
+        cost = 0  # Free - no charge for calls under 5 seconds
     else:
-        cost = round((duration / 60) * rate, 2)
+        if call.get("is_first_call"):
+            # First call discount: ₹1/min for first 5 mins
+            if duration <= 300:
+                # Full first minute at ₹1 + per-second for remaining
+                cost = 1.0  # first minute flat
+                if duration > 60:
+                    cost += ((duration - 60) / 60) * 1.0
+            else:
+                # First 5 min at ₹1/min + rest at normal rate
+                cost = 5.0  # 5 minutes at ₹1
+                normal_rate = 5 if call["call_type"] == "voice" else 8
+                cost += ((duration - 300) / 60) * normal_rate
+        else:
+            # Standard billing: full first minute charge + per-second after
+            cost = rate  # first minute flat charge
+            if duration > 60:
+                cost += ((duration - 60) / 60) * rate
+        cost = round(cost, 2)
 
     await db.calls.update_one({"id": req.call_id}, {"$set": {
         "status": "ended",
