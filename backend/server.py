@@ -62,6 +62,7 @@ class ListenerOnboard(BaseModel):
     style_tags: List[str]
     topic_tags: List[str]
     boundary_answers: List[int]
+    referral_code: Optional[str] = None  # code used to join
 
 class RechargeRequest(BaseModel):
     pack_id: str
@@ -90,6 +91,9 @@ class WithdrawRequest(BaseModel):
 
 class ToggleOnlineRequest(BaseModel):
     online: bool
+
+class ApplyReferralRequest(BaseModel):
+    referral_code: str
 
 # ─── HELPERS ───────────────────────────────────────────
 def create_token(user_id: str, role: str) -> str:
