@@ -479,7 +479,49 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
         "listener_earned": earnings
     }
 
-@api_router.get("/calls/history")
+# Endpoint for listener to get their 100ms token for an incoming call
+@api_router.get("/calls/incoming-token")
+async def get_incoming_call_token(user=Depends(get_current_user)):
+    if user["role"] != "listener":
+        raise HTTPException(status_code=403, detail="Listeners only")
+    token_doc = await db.hms_call_tokens.find_one(
+        {"listener_id": user["user_id"]}, {"_id": 0},
+        sort=[("created_at", -1)]
+    )
+    if not token_doc:
+        raise HTTPException(status_code=404, detail="No incoming call")
+    # Find the associated call
+    call = await db.calls.find_one(
+        {"id": token_doc["call_id"], "status": "active"}, {"_id": 0}
+    )
+    if not call:
+        raise HTTPException(status_code=404, detail="No active incoming call")
+    return {
+        "success": True,
+        "call_id": token_doc["call_id"],
+        "hms_token": token_doc["hms_token"],
+        "hms_room_id": token_doc["hms_room_id"],
+        "call": call
+    }
+
+# 100ms room management endpoint
+@api_router.get("/hms/room-status/{room_id}")
+async def get_hms_room_status(room_id: str):
+    """Check 100ms room status"""
+    try:
+        mgmt_token = generate_hms_management_token()
+        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            response = await http_client.get(
+                f"{HMS_API_BASE}/rooms/{room_id}",
+                headers={"Authorization": f"Bearer {mgmt_token}"}
+            )
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail="Room not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 async def call_history(user=Depends(get_current_user)):
     field = "seeker_id" if user["role"] == "seeker" else "listener_id"
     calls = await db.calls.find(
