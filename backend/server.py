@@ -367,11 +367,13 @@ async def listener_onboard(req: ListenerOnboard, user=Depends(get_current_user))
         "style_tags": req.style_tags,
         "topic_tags": req.topic_tags,
         "boundary_answers": req.boundary_answers,
-        "is_online": False,
+        "is_online": True,  # Auto-online when they open app
+        "kyc_status": "pending",  # pending, submitted, verified, rejected
         "tier": "new",
         "total_calls": 0,
         "total_minutes": 0,
         "avg_rating": 0,
+        "last_matched_at": None,
         "created_at": now()
     }
     await db.listener_profiles.update_one(
