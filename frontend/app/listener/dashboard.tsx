@@ -8,6 +8,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import api from '../../src/api';
 import { t } from '../../src/i18n';
+import {
+  registerForPushNotifications,
+  addNotificationReceivedListener,
+} from '../../src/notifications';
 
 export default function ListenerDashboard() {
   const router = useRouter();
@@ -91,14 +95,35 @@ export default function ListenerDashboard() {
 
   useEffect(() => {
     loadData();
+
+    // Register for push notifications and re-send token on dashboard mount
+    registerForPushNotifications();
+
+    // Listen for push notifications while dashboard is open
+    const notificationSub = addNotificationReceivedListener((notification) => {
+      const data = notification.request.content.data;
+      if (data?.type === 'incoming_call' && data?.call_id) {
+        setIncomingCall({
+          call_id: data.call_id as string,
+          caller_name: (data.caller_name as string) || 'Someone',
+          call_type: (data.call_type as string) || 'voice',
+        });
+        Vibration.vibrate([0, 500, 200, 500]);
+      }
+    });
+
     // Send heartbeat every 30 seconds to stay online
     const heartbeatInterval = setInterval(() => {
       api.post('/listeners/heartbeat').catch(() => {});
     }, 30000);
-    // Poll for incoming calls every 3 seconds
+
+    // Fallback: poll for incoming calls every 5 seconds
+    // (in case push notification was missed or delayed)
     checkIncomingCall();
-    incomingPollRef.current = setInterval(checkIncomingCall, 3000);
+    incomingPollRef.current = setInterval(checkIncomingCall, 5000);
+
     return () => {
+      notificationSub.remove();
       clearInterval(heartbeatInterval);
       if (incomingPollRef.current) clearInterval(incomingPollRef.current);
       // Go offline when leaving dashboard

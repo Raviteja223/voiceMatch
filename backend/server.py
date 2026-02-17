@@ -80,6 +80,9 @@ class CallRejectRequest(BaseModel):
 class CallEndRequest(BaseModel):
     call_id: str
 
+class PushTokenRequest(BaseModel):
+    token: str  # Expo push token (ExponentPushToken[xxx])
+
 class RatingRequest(BaseModel):
     call_id: str
     rating: str  # great, good, okay, bad
@@ -211,6 +214,43 @@ async def end_hms_room(room_id: str):
             logger.info(f"100ms room ended: {room_id} - status {response.status_code}")
     except Exception as e:
         logger.error(f"100ms room end error: {e}")
+
+# ─── EXPO PUSH NOTIFICATIONS ─────────────────────────────
+async def send_expo_push_notification(push_token: str, title: str, body: str, data: dict = None):
+    """Send a push notification via Expo Push API"""
+    if not push_token or not push_token.startswith("ExponentPushToken"):
+        logger.warning(f"Invalid push token: {push_token}")
+        return False
+    try:
+        message = {
+            "to": push_token,
+            "sound": "default",
+            "title": title,
+            "body": body,
+            "priority": "high",
+            "channelId": "incoming-calls",
+        }
+        if data:
+            message["data"] = data
+        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            response = await http_client.post(
+                "https://exp.host/--/api/v2/push/send",
+                json=message,
+                headers={
+                    "Accept": "application/json",
+                    "Accept-encoding": "gzip, deflate",
+                    "Content-Type": "application/json",
+                }
+            )
+            if response.status_code == 200:
+                logger.info(f"Push notification sent to {push_token[:30]}...")
+                return True
+            else:
+                logger.error(f"Push notification failed: {response.status_code} - {response.text}")
+                return False
+    except Exception as e:
+        logger.error(f"Push notification error: {e}")
+        return False
 
 # ─── ANTI-COLLUSION ENGINE ─────────────────────────────
 async def run_anti_collusion_checks(seeker_id: str, listener_id: str, call_id: str, duration: int):
@@ -620,6 +660,21 @@ async def talk_now(user=Depends(get_current_user)):
     )
     return {"success": True, "listener": matched}
 
+# ─── PUSH NOTIFICATIONS ────────────────────────────────
+@api_router.post("/notifications/register-token")
+async def register_push_token(req: PushTokenRequest, user=Depends(get_current_user)):
+    """Register or update Expo push token for the current user"""
+    await db.push_tokens.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {
+            "user_id": user["user_id"],
+            "token": req.token,
+            "updated_at": now()
+        }},
+        upsert=True
+    )
+    return {"success": True, "message": "Push token registered"}
+
 # ─── CALLS ─────────────────────────────────────────────
 @api_router.post("/calls/start")
 async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
@@ -669,6 +724,23 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
     }
     await db.calls.insert_one(call)
     call.pop("_id", None)
+
+    # Send push notification to listener about incoming call
+    seeker_profile = await db.seeker_profiles.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    seeker_name = seeker_profile.get("name", "Someone") if seeker_profile else "Someone"
+    listener_push = await db.push_tokens.find_one({"user_id": req.listener_id}, {"_id": 0})
+    if listener_push and listener_push.get("token"):
+        await send_expo_push_notification(
+            push_token=listener_push["token"],
+            title="Incoming Call",
+            body=f"{seeker_name} is calling you...",
+            data={
+                "type": "incoming_call",
+                "call_id": call_id,
+                "caller_name": seeker_name,
+                "call_type": req.call_type,
+            }
+        )
 
     # Return call data with 100ms token for seeker
     call["hms_token"] = seeker_hms_token
