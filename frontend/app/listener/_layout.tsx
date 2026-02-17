@@ -24,6 +24,7 @@ export default function ListenerLayout() {
       }}
     >
       <Tabs.Screen name="dashboard" options={{ title: 'Dashboard', tabBarIcon: ({ color, size }) => <Ionicons name="stats-chart" size={size} color={color} /> }} />
+      <Tabs.Screen name="referral" options={{ title: 'Refer & Earn', tabBarIcon: ({ color, size }) => <Ionicons name="gift" size={size} color={color} /> }} />
       <Tabs.Screen name="calls" options={{ title: 'Calls', tabBarIcon: ({ color, size }) => <Ionicons name="call" size={size} color={color} /> }} />
       <Tabs.Screen name="profile" options={{ title: 'Profile', tabBarIcon: ({ color, size }) => <Ionicons name="person" size={size} color={color} /> }} />
     </Tabs>
