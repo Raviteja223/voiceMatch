@@ -161,18 +161,20 @@ export default function ReferralScreen() {
           {/* Tier Progression */}
           <View style={styles.tierProgression}>
             <Text style={styles.tierProgTitle}>Tier Rewards</Text>
+            <Text style={styles.tierNote}>⚡ Bonus paid when referral completes 30 min calls</Text>
             <View style={styles.tierRow}>
-              <View style={[styles.tierBadge, { backgroundColor: '#FDEBD0' }]}><Text style={styles.tierBadgeText}>🥉 Bronze</Text></View>
-              <Text style={styles.tierRowText}>₹200/ref · 5% commission</Text>
+              <View style={[styles.tierBadge, { backgroundColor: '#FDEBD0' }]}><Text style={styles.tierBadgeText}>🥉 Bronze (1-5)</Text></View>
+              <Text style={styles.tierRowText}>₹50/ref · 5%/15 days</Text>
             </View>
             <View style={styles.tierRow}>
-              <View style={[styles.tierBadge, { backgroundColor: '#E8DAEF' }]}><Text style={styles.tierBadgeText}>🥈 Silver (6+)</Text></View>
-              <Text style={styles.tierRowText}>₹300/ref · 7% commission</Text>
+              <View style={[styles.tierBadge, { backgroundColor: '#E8DAEF' }]}><Text style={styles.tierBadgeText}>🥈 Silver (6-15)</Text></View>
+              <Text style={styles.tierRowText}>₹75/ref · 7.5%/15 days</Text>
             </View>
             <View style={styles.tierRow}>
-              <View style={[styles.tierBadge, { backgroundColor: '#FFF3CD' }]}><Text style={styles.tierBadgeText}>🥇 Gold (16+)</Text></View>
-              <Text style={styles.tierRowText}>₹500/ref · 10% commission</Text>
+              <View style={[styles.tierBadge, { backgroundColor: '#FFF3CD' }]}><Text style={styles.tierBadgeText}>🥇 Gold (16-25)</Text></View>
+              <Text style={styles.tierRowText}>₹100/ref · 10%/15 days</Text>
             </View>
+            <Text style={styles.maxNote}>Maximum 25 referrals per listener</Text>
           </View>
 
           {/* Apply Code Section */}
