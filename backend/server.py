@@ -11,6 +11,7 @@ from typing import List, Optional
 import uuid
 import jwt
 import random
+import httpx
 from datetime import datetime, timezone, timedelta
 
 ROOT_DIR = Path(__file__).parent
@@ -23,6 +24,11 @@ db = client[os.environ['DB_NAME']]
 JWT_SECRET = "voicematch-secret-key-2024"
 JWT_ALGORITHM = "HS256"
 security = HTTPBearer(auto_error=False)
+
+# 100ms Configuration
+HMS_APP_ACCESS_KEY = os.environ.get('HMS_APP_ACCESS_KEY', '')
+HMS_APP_SECRET = os.environ.get('HMS_APP_SECRET', '')
+HMS_API_BASE = "https://api.100ms.live/v2"
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
