@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Animated, Dimensions } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Animated, Dimensions, Image } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -31,10 +31,11 @@ export default function WelcomeScreen() {
       <View style={styles.content}>
         <View style={styles.topSection}>
           <Animated.View style={[styles.logoContainer, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
-            <View style={styles.logoCircle}>
-              <Ionicons name="chatbubbles" size={48} color="#FF8FA3" />
-            </View>
-            <Text style={styles.appName}>VoiceMatch</Text>
+            <Image 
+              source={require('../assets/images/konnectra-logo.png')} 
+              style={styles.logoImage}
+              resizeMode="contain"
+            />
             <Text style={styles.tagline}>Voice Companionship Platform</Text>
           </Animated.View>
 
@@ -84,11 +85,8 @@ const styles = StyleSheet.create({
   content: { flex: 1, justifyContent: 'space-between', paddingHorizontal: 24 },
   topSection: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 40 },
   logoContainer: { alignItems: 'center', marginBottom: 48 },
-  logoCircle: {
-    width: 96, height: 96, borderRadius: 48,
-    backgroundColor: '#FFE0E6', alignItems: 'center', justifyContent: 'center',
-    marginBottom: 20, shadowColor: '#FF8FA3', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2, shadowRadius: 12, elevation: 6,
+  logoImage: {
+    width: 220, height: 80, marginBottom: 12,
   },
   appName: { fontSize: 32, fontWeight: '700', color: '#2D3748', letterSpacing: -0.5 },
   tagline: { fontSize: 15, color: '#718096', marginTop: 6, fontWeight: '500' },
