@@ -649,6 +649,59 @@ async def submit_report(req: ReportRequest, user=Depends(get_current_user)):
     })
     return {"success": True, "message": "Report submitted"}
 
+# ─── REFERRAL HELPERS ──────────────────────────────────
+REFERRAL_TIERS = {
+    "bronze": {"min_referrals": 0, "bonus": 200, "commission_rate": 0.05, "commission_days": 90},
+    "silver": {"min_referrals": 6, "bonus": 300, "commission_rate": 0.07, "commission_days": 90},
+    "gold": {"min_referrals": 16, "bonus": 500, "commission_rate": 0.10, "commission_days": 90},
+}
+REFERRAL_ACTIVATION_MINUTES = 30  # referred listener must hit 30 min talk time to activate
+
+def get_referral_tier(successful_referrals: int):
+    if successful_referrals >= 16:
+        return "gold", REFERRAL_TIERS["gold"]
+    elif successful_referrals >= 6:
+        return "silver", REFERRAL_TIERS["silver"]
+    return "bronze", REFERRAL_TIERS["bronze"]
+
+def generate_referral_code(name: str) -> str:
+    return f"{name[:3].upper()}{random.randint(1000, 9999)}"
+
+async def process_referral_commission(listener_id: str, call_earnings: float):
+    """Process 5-10% ongoing commission from referred listener's earnings to referrer"""
+    referral = await db.referrals.find_one(
+        {"referred_id": listener_id, "status": "active"}, {"_id": 0}
+    )
+    if not referral:
+        return
+    # Check if commission period expired
+    activated_at = datetime.fromisoformat(referral.get("activated_at", now()))
+    days_since = (datetime.now(timezone.utc) - activated_at).days
+    tier_name, tier = get_referral_tier(
+        await db.referrals.count_documents({"referrer_id": referral["referrer_id"], "status": "active"})
+    )
+    if days_since > tier["commission_days"]:
+        return  # Commission period expired
+    commission = round(call_earnings * tier["commission_rate"], 2)
+    if commission <= 0:
+        return
+    # Credit commission to referrer's earnings
+    await db.listener_earnings.update_one(
+        {"user_id": referral["referrer_id"]},
+        {"$inc": {"total_earned": commission, "pending_balance": commission}}
+    )
+    await db.listener_earnings_ledger.insert_one({
+        "id": uid(), "user_id": referral["referrer_id"],
+        "type": "referral_commission", "amount": commission,
+        "description": f"Referral commission ({int(tier['commission_rate']*100)}%) from {referral.get('referred_name', 'referral')}",
+        "created_at": now()
+    })
+    # Track total commission
+    await db.referrals.update_one(
+        {"id": referral["id"]},
+        {"$inc": {"total_commission": commission}}
+    )
+
 # ─── EARNINGS ──────────────────────────────────────────
 @api_router.get("/earnings/dashboard")
 async def earnings_dashboard(user=Depends(get_current_user)):
