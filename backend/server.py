@@ -120,18 +120,23 @@ def uid():
 # ─── 100ms HELPERS ─────────────────────────────────────
 def generate_hms_management_token():
     """Generate a management token for 100ms REST API calls"""
+    now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+    token_id = str(uuid.uuid4())
     payload = {
         "access_key": HMS_APP_ACCESS_KEY,
         "type": "management",
         "version": 2,
-        "iat": int(datetime.now(tz=timezone.utc).timestamp()),
-        "nbf": int(datetime.now(tz=timezone.utc).timestamp()),
-        "exp": int((datetime.now(tz=timezone.utc) + timedelta(hours=24)).timestamp()),
+        "iat": now_ts,
+        "nbf": now_ts,
+        "exp": now_ts + 86400,
+        "jti": token_id,
     }
-    return jwt.encode(payload, HMS_APP_SECRET, algorithm="HS256", headers={"jti": str(uuid.uuid4())})
+    return jwt.encode(payload, HMS_APP_SECRET, algorithm="HS256")
 
 def generate_hms_app_token(room_id: str, user_id: str, role: str = "guest"):
     """Generate an app token for a user to join a 100ms room"""
+    now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+    token_id = str(uuid.uuid4())
     payload = {
         "access_key": HMS_APP_ACCESS_KEY,
         "room_id": room_id,
@@ -139,11 +144,12 @@ def generate_hms_app_token(room_id: str, user_id: str, role: str = "guest"):
         "role": role,
         "type": "app",
         "version": 2,
-        "iat": int(datetime.now(tz=timezone.utc).timestamp()),
-        "nbf": int(datetime.now(tz=timezone.utc).timestamp()),
-        "exp": int((datetime.now(tz=timezone.utc) + timedelta(hours=1)).timestamp()),
+        "iat": now_ts,
+        "nbf": now_ts,
+        "exp": now_ts + 3600,
+        "jti": token_id,
     }
-    return jwt.encode(payload, HMS_APP_SECRET, algorithm="HS256", headers={"jti": str(uuid.uuid4())})
+    return jwt.encode(payload, HMS_APP_SECRET, algorithm="HS256")
 
 async def create_hms_room(room_name: str):
     """Create a new 100ms room via REST API"""
