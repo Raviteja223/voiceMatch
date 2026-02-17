@@ -1045,6 +1045,10 @@ async def apply_referral_code(req: ApplyReferralRequest, user=Depends(get_curren
         raise HTTPException(status_code=404, detail="Invalid referral code")
     if ref_code["user_id"] == user["user_id"]:
         raise HTTPException(status_code=400, detail="Cannot use your own referral code")
+    # Check if referrer has hit max referrals (25)
+    referrer_total = await db.referrals.count_documents({"referrer_id": ref_code["user_id"]})
+    if referrer_total >= MAX_TOTAL_REFERRALS:
+        raise HTTPException(status_code=400, detail="This referrer has reached the maximum referral limit")
     # Get names for display
     referrer_profile = await db.listener_profiles.find_one({"user_id": ref_code["user_id"]}, {"_id": 0})
     referred_profile = await db.listener_profiles.find_one({"user_id": user["user_id"]}, {"_id": 0})
