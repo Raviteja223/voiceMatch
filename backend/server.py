@@ -199,6 +199,79 @@ async def end_hms_room(room_id: str):
     except Exception as e:
         logger.error(f"100ms room end error: {e}")
 
+# ─── ANTI-COLLUSION ENGINE ─────────────────────────────
+async def run_anti_collusion_checks(seeker_id: str, listener_id: str, call_id: str, duration: int):
+    """Run anti-collusion checks after each call"""
+    flags = []
+    now_dt = datetime.now(timezone.utc)
+    today_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # 1. Short call spam: 3 calls < 60 sec in 15 min
+    fifteen_min_ago = now_dt - timedelta(minutes=15)
+    recent_short = await db.calls.count_documents({
+        "seeker_id": seeker_id, "duration_seconds": {"$lt": 60, "$gt": 0},
+        "created_at": {"$gte": fifteen_min_ago.isoformat()}
+    })
+    if recent_short >= 3:
+        flags.append({"type": "short_call_spam", "desc": f"{recent_short} short calls in 15min"})
+
+    # 2. Same pair abuse: >3 calls/day or >60 min/day
+    pair_calls_today = await db.calls.find(
+        {"seeker_id": seeker_id, "listener_id": listener_id, "created_at": {"$gte": today_start.isoformat()}},
+        {"_id": 0}
+    ).to_list(100)
+    if len(pair_calls_today) > 3:
+        flags.append({"type": "pair_overcall", "desc": f"{len(pair_calls_today)} calls today with same pair"})
+    pair_minutes = sum(c.get("duration_seconds", 0) for c in pair_calls_today) / 60
+    if pair_minutes > 60:
+        flags.append({"type": "pair_overminutes", "desc": f"{pair_minutes:.0f} min today with same pair"})
+
+    # 3. Silence farming: call < 30 seconds but not a quick disconnect
+    if 5 < duration < 30:
+        silence_count = await db.risk_flags.count_documents({
+            "user_id": seeker_id, "flag_type": "silence_farming",
+            "created_at": {"$gte": today_start.isoformat()}
+        })
+        if silence_count >= 2:
+            flags.append({"type": "silence_farming", "desc": "Multiple very short calls"})
+
+    # Store flags
+    for f in flags:
+        await db.risk_flags.insert_one({
+            "id": uid(), "user_id": seeker_id, "listener_id": listener_id,
+            "call_id": call_id, "flag_type": f["type"],
+            "description": f["desc"], "status": "active",
+            "created_at": now()
+        })
+        logger.warning(f"Anti-collusion flag: {f['type']} - {f['desc']} (seeker={seeker_id[:8]})")
+
+    # Auto-actions
+    active_flags = await db.risk_flags.count_documents({"user_id": seeker_id, "status": "active"})
+    if active_flags >= 5:
+        await db.users.update_one({"id": seeker_id}, {"$set": {"shadow_limited": True}})
+        logger.warning(f"Shadow-limited seeker {seeker_id[:8]} with {active_flags} flags")
+
+# ─── CALL RECORDING METADATA ──────────────────────────
+async def create_call_recording_metadata(call_id: str, seeker_id: str, listener_id: str, hms_room_id: str):
+    """Store encrypted call recording metadata (actual recording via 100ms)"""
+    await db.call_recordings.insert_one({
+        "id": uid(), "call_id": call_id,
+        "seeker_id": seeker_id, "listener_id": listener_id,
+        "hms_room_id": hms_room_id,
+        "status": "recorded",
+        "encrypted": True,
+        "retention_days": 15,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=15)).isoformat(),
+        "created_at": now()
+    })
+
+async def cleanup_expired_recordings():
+    """Delete recordings older than 15 days"""
+    cutoff = datetime.now(timezone.utc).isoformat()
+    result = await db.call_recordings.delete_many({"expires_at": {"$lt": cutoff}})
+    if result.deleted_count:
+        logger.info(f"Cleaned up {result.deleted_count} expired recordings")
+
 # ─── AUTH ──────────────────────────────────────────────
 @api_router.post("/auth/send-otp")
 async def send_otp(req: OTPRequest):
