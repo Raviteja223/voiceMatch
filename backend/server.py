@@ -735,6 +735,127 @@ async def withdraw(req: WithdrawRequest, user=Depends(get_current_user)):
     })
     return {"success": True, "message": f"₹{req.amount} withdrawal initiated to {req.upi_id}"}
 
+# ─── REFERRAL SYSTEM ──────────────────────────────────
+@api_router.get("/referral/my-code")
+async def get_my_referral_code(user=Depends(get_current_user)):
+    if user["role"] != "listener":
+        raise HTTPException(status_code=403, detail="Listeners only")
+    # Get or generate referral code
+    ref = await db.referral_codes.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    if not ref:
+        profile = await db.listener_profiles.find_one({"user_id": user["user_id"]}, {"_id": 0})
+        code = generate_referral_code(profile.get("name", "LST") if profile else "LST")
+        # Ensure unique
+        while await db.referral_codes.find_one({"code": code}):
+            code = generate_referral_code(profile.get("name", "LST") if profile else "LST")
+        ref = {"user_id": user["user_id"], "code": code, "created_at": now()}
+        await db.referral_codes.insert_one(ref)
+        ref.pop("_id", None)
+    # Get referral stats
+    total_referrals = await db.referrals.count_documents({"referrer_id": user["user_id"]})
+    active_referrals = await db.referrals.count_documents({"referrer_id": user["user_id"], "status": "active"})
+    pending_referrals = await db.referrals.count_documents({"referrer_id": user["user_id"], "status": "pending"})
+    tier_name, tier = get_referral_tier(active_referrals)
+    # Total commission earned
+    pipeline = [
+        {"$match": {"referrer_id": user["user_id"]}},
+        {"$group": {"_id": None, "total": {"$sum": "$total_commission"}, "bonuses": {"$sum": "$bonus_paid"}}}
+    ]
+    stats = await db.referrals.aggregate(pipeline).to_list(1)
+    total_commission = stats[0]["total"] if stats else 0
+    total_bonuses = stats[0]["bonuses"] if stats else 0
+    return {
+        "code": ref["code"],
+        "total_referrals": total_referrals,
+        "active_referrals": active_referrals,
+        "pending_referrals": pending_referrals,
+        "tier": tier_name,
+        "bonus_per_referral": tier["bonus"],
+        "commission_rate": f"{int(tier['commission_rate']*100)}%",
+        "commission_days": tier["commission_days"],
+        "total_commission_earned": round(total_commission, 2),
+        "total_bonuses_earned": round(total_bonuses, 2),
+    }
+
+@api_router.post("/referral/apply")
+async def apply_referral_code(req: ApplyReferralRequest, user=Depends(get_current_user)):
+    if user["role"] != "listener":
+        raise HTTPException(status_code=403, detail="Listeners only")
+    # Check if already used a referral code
+    existing = await db.referrals.find_one({"referred_id": user["user_id"]})
+    if existing:
+        raise HTTPException(status_code=400, detail="You already used a referral code")
+    # Find referrer's code
+    ref_code = await db.referral_codes.find_one({"code": req.referral_code.upper()}, {"_id": 0})
+    if not ref_code:
+        raise HTTPException(status_code=404, detail="Invalid referral code")
+    if ref_code["user_id"] == user["user_id"]:
+        raise HTTPException(status_code=400, detail="Cannot use your own referral code")
+    # Get names for display
+    referrer_profile = await db.listener_profiles.find_one({"user_id": ref_code["user_id"]}, {"_id": 0})
+    referred_profile = await db.listener_profiles.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    referral = {
+        "id": uid(),
+        "referrer_id": ref_code["user_id"],
+        "referrer_name": referrer_profile.get("name", "Listener") if referrer_profile else "Listener",
+        "referred_id": user["user_id"],
+        "referred_name": referred_profile.get("name", "Listener") if referred_profile else "Listener",
+        "code_used": req.referral_code.upper(),
+        "status": "pending",  # pending → active after 30 min talk time
+        "total_commission": 0,
+        "bonus_paid": 0,
+        "created_at": now(),
+        "activated_at": None,
+    }
+    await db.referrals.insert_one(referral)
+    return {
+        "success": True,
+        "message": f"Referral code applied! Your referrer will earn a bonus once you complete {REFERRAL_ACTIVATION_MINUTES} minutes of calls.",
+        "referrer_name": referral["referrer_name"]
+    }
+
+@api_router.get("/referral/my-referrals")
+async def get_my_referrals(user=Depends(get_current_user)):
+    if user["role"] != "listener":
+        raise HTTPException(status_code=403, detail="Listeners only")
+    referrals = await db.referrals.find(
+        {"referrer_id": user["user_id"]}, {"_id": 0}
+    ).sort("created_at", -1).to_list(100)
+    return {"referrals": referrals}
+
+# Check and activate pending referrals (called after each call ends)
+async def check_referral_activation(listener_id: str):
+    """Check if referred listener has hit 30 min talk time to activate referral"""
+    referral = await db.referrals.find_one(
+        {"referred_id": listener_id, "status": "pending"}, {"_id": 0}
+    )
+    if not referral:
+        return
+    profile = await db.listener_profiles.find_one({"user_id": listener_id}, {"_id": 0})
+    if not profile:
+        return
+    if profile.get("total_minutes", 0) >= REFERRAL_ACTIVATION_MINUTES:
+        # Activate referral!
+        active_count = await db.referrals.count_documents({"referrer_id": referral["referrer_id"], "status": "active"})
+        tier_name, tier = get_referral_tier(active_count)
+        bonus = tier["bonus"]
+        await db.referrals.update_one(
+            {"id": referral["id"]},
+            {"$set": {"status": "active", "activated_at": now(), "bonus_paid": bonus}}
+        )
+        # Pay referrer the activation bonus
+        await db.listener_earnings.update_one(
+            {"user_id": referral["referrer_id"]},
+            {"$inc": {"total_earned": bonus, "pending_balance": bonus}}
+        )
+        await db.listener_earnings_ledger.insert_one({
+            "id": uid(), "user_id": referral["referrer_id"],
+            "type": "referral_bonus", "amount": bonus,
+            "description": f"Referral bonus - {referral['referred_name']} activated ({tier_name} tier ₹{bonus})",
+            "created_at": now()
+        })
+        logger.info(f"Referral activated: {referral['referred_name']} → bonus ₹{bonus} to {referral['referrer_name']}")
+
 # ─── ADMIN ─────────────────────────────────────────────
 @api_router.get("/admin/dashboard")
 async def admin_dashboard():
