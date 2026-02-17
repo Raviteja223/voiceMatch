@@ -401,11 +401,32 @@ async def get_listener_profile(user=Depends(get_current_user)):
 
 @api_router.post("/listeners/toggle-online")
 async def toggle_online(req: ToggleOnlineRequest, user=Depends(get_current_user)):
+    # Now used as heartbeat - listener auto-goes online when app opens
     await db.listener_profiles.update_one(
         {"user_id": user["user_id"]},
-        {"$set": {"is_online": req.online, "last_online": now()}}
+        {"$set": {"is_online": True, "last_online": now()}}
     )
-    return {"success": True, "online": req.online}
+    return {"success": True, "online": True}
+
+# Auto-online heartbeat endpoint - called when listener opens dashboard
+@api_router.post("/listeners/heartbeat")
+async def listener_heartbeat(user=Depends(get_current_user)):
+    if user["role"] != "listener":
+        raise HTTPException(status_code=403, detail="Listeners only")
+    await db.listener_profiles.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"is_online": True, "last_online": now()}}
+    )
+    return {"success": True, "online": True}
+
+# Go offline when listener leaves the app
+@api_router.post("/listeners/go-offline")
+async def go_offline(user=Depends(get_current_user)):
+    await db.listener_profiles.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"is_online": False, "last_online": now()}}
+    )
+    return {"success": True, "online": False}
 
 @api_router.get("/listeners/online")
 async def get_online_listeners(user=Depends(get_current_user)):
@@ -430,27 +451,55 @@ async def talk_now(user=Depends(get_current_user)):
     wallet = await db.wallet_accounts.find_one({"user_id": user["user_id"]}, {"_id": 0})
     if not wallet or wallet.get("balance", 0) < 5:
         raise HTTPException(status_code=400, detail="Insufficient balance. Minimum 5 credits required.")
+    # Check shadow-limited
+    seeker_user = await db.users.find_one({"id": user["user_id"]}, {"_id": 0})
+    if seeker_user and seeker_user.get("shadow_limited"):
+        raise HTTPException(status_code=404, detail="No listeners available right now. Try again shortly.")
     online = await db.listener_profiles.find(
         {"is_online": True, "in_call": {"$ne": True}}, {"_id": 0}
     ).to_list(50)
     if not online:
         raise HTTPException(status_code=404, detail="No listeners available right now. Try again shortly.")
-    # Score and sort
+
+    # IMPROVED FAIRNESS ROTATION: Prioritize least-recently-matched listeners
     scored = []
     for l in online:
         score = 0
+        # Language match (hard weight)
         lang_match = set(seeker.get("languages", [])) & set(l.get("languages", []))
-        score += len(lang_match) * 5
+        score += len(lang_match) * 10
+        # Tag overlap
         tag_match = set(seeker.get("intent_tags", [])) & set(l.get("topic_tags", []))
         score += len(tag_match) * 3
-        if l.get("tier") == "trusted":
-            score += 2
-        elif l.get("tier") == "elite":
-            score += 4
-        score += random.randint(0, 3)  # Fairness rotation
+        # Tier bonus
+        if l.get("tier") == "trusted": score += 2
+        elif l.get("tier") == "elite": score += 4
+        # FAIRNESS: Penalize recently matched listeners (spread calls across all)
+        last_matched = l.get("last_matched_at")
+        if last_matched:
+            try:
+                mins_since = (datetime.now(timezone.utc) - datetime.fromisoformat(last_matched)).total_seconds() / 60
+                score += min(mins_since, 30)  # Up to 30 bonus pts for waiting long
+            except Exception:
+                score += 15  # Default bonus
+        else:
+            score += 30  # Never matched = highest priority
+        # FAIRNESS: Penalize same-pair repeat matching
+        pair_calls_today = await db.calls.count_documents({
+            "seeker_id": user["user_id"], "listener_id": l["user_id"],
+            "created_at": {"$gte": datetime.now(timezone.utc).replace(hour=0).isoformat()}
+        })
+        score -= pair_calls_today * 10  # Strong penalty for repeated pairing
+        # Small random factor
+        score += random.randint(0, 5)
         scored.append((score, l))
+
     scored.sort(key=lambda x: x[0], reverse=True)
     matched = scored[0][1]
+    # Update last_matched_at for the selected listener
+    await db.listener_profiles.update_one(
+        {"user_id": matched["user_id"]}, {"$set": {"last_matched_at": now()}}
+    )
     return {"success": True, "listener": matched}
 
 # ─── CALLS ─────────────────────────────────────────────
