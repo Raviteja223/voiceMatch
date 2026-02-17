@@ -499,6 +499,8 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
         {"user_id": call["listener_id"]},
         {"$inc": {"total_calls": 1, "total_minutes": duration / 60}, "$set": {"in_call": False}}
     )
+    # Check if this listener's referral should be activated
+    await check_referral_activation(call["listener_id"])
     # End 100ms room
     if call.get("hms_room_id"):
         await end_hms_room(call["hms_room_id"])
