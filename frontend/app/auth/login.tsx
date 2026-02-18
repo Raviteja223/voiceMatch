@@ -6,8 +6,22 @@ import {
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import api from '../../src/api';
 import { saveUser } from '../../src/store';
+
+/** Returns a stable per-install device fingerprint stored in AsyncStorage. */
+async function getDeviceId(): Promise<string> {
+  try {
+    const stored = await AsyncStorage.getItem('vm_device_id');
+    if (stored) return stored;
+    const id = `${Platform.OS}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    await AsyncStorage.setItem('vm_device_id', id);
+    return id;
+  } catch {
+    return '';
+  }
+}
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -32,7 +46,8 @@ export default function LoginScreen() {
     if (otp.length !== 4) return Alert.alert('Error', 'Enter 4-digit OTP');
     setLoading(true);
     try {
-      const res = await api.post('/auth/verify-otp', { phone: `+91${phone}`, otp });
+      const device_id = await getDeviceId();
+      const res = await api.post('/auth/verify-otp', { phone: `+91${phone}`, otp, device_id });
       api.setToken(res.token);
       await saveUser(res.user);
 
