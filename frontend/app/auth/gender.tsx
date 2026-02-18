@@ -18,7 +18,7 @@ export default function GenderScreen() {
     setLoading(true);
     try {
       const res = await api.post('/auth/set-gender', { gender: selected });
-      api.setToken(res.token);
+      await api.setToken(res.token);
       await saveUser(res.user);
       const role = res.user.role;
       router.replace(role === 'seeker' ? '/onboarding/seeker' : '/onboarding/listener');

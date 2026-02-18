@@ -101,7 +101,7 @@ export default function WelcomeScreen() {
             <TouchableOpacity
               testID="get-started-btn"
               style={styles.primaryBtn}
-              onPress={() => router.push('/auth/login')}
+              onPress={() => router.replace('/auth/login')}
               activeOpacity={0.85}
             >
               <Ionicons name="chatbubble-ellipses" size={22} color="#fff" />

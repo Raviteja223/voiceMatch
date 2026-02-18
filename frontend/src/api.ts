@@ -13,9 +13,9 @@ class ApiClient {
     return this.token;
   }
 
-  setToken(token: string) {
+  async setToken(token: string) {
     this.token = token;
-    AsyncStorage.setItem('auth_token', token);
+    await AsyncStorage.setItem('auth_token', token);
   }
 
   async clearToken() {
