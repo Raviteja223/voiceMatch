@@ -13,11 +13,16 @@ const { width } = Dimensions.get('window');
 
 export default function CallScreen() {
   const router = useRouter();
-  const { listenerId, listenerName, listenerAvatar, callType } = useLocalSearchParams<{
+  const params = useLocalSearchParams<{
     listenerId: string; listenerName: string; listenerAvatar: string; callType: string;
+    callId: string; isListener: string;
   }>();
+  const { listenerId, listenerName, listenerAvatar, callType } = params;
+  // isListener='true' means this is the listener side of the call (already accepted)
+  const isListener = params.isListener === 'true';
+  const presetCallId = params.callId || '';
 
-  const [callId, setCallId] = useState('');
+  const [callId, setCallId] = useState(isListener ? presetCallId : '');
   const [seconds, setSeconds] = useState(0);
   const [status, setStatus] = useState<'connecting' | 'ringing' | 'active' | 'ended'>('connecting');
   const statusRef = useRef<'connecting' | 'ringing' | 'active' | 'ended'>('connecting');
@@ -33,8 +38,9 @@ export default function CallScreen() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const connectAnim = useRef(new Animated.Value(0)).current;
-  const callIdRef = useRef('');
+  const callIdRef = useRef(isListener ? presetCallId : '');
   const rateRef = useRef(5);
+  const secondsRef = useRef(0);
 
   const colors = AVATAR_COLORS[listenerAvatar || 'avatar_1'] || AVATAR_COLORS.avatar_1;
 
@@ -50,7 +56,35 @@ export default function CallScreen() {
     dotsRef.current = setInterval(() => {
       setConnectingDots(prev => prev.length >= 3 ? '' : prev + '.');
     }, 500);
-    startCall();
+
+    if (isListener && presetCallId) {
+      // Listener: call already accepted — skip the start handshake and go active
+      startActiveCall();
+      // Poll every 3s to detect if the seeker has ended the call
+      pollRef.current = setInterval(async () => {
+        try {
+          const statusRes = await api.get(`/calls/status/${presetCallId}`);
+          if (statusRes.status === 'ended' || statusRes.status === 'missed') {
+            if (pollRef.current) clearInterval(pollRef.current);
+            if (timerRef.current) clearInterval(timerRef.current);
+            router.replace({
+              pathname: '/rating',
+              params: {
+                callId: presetCallId,
+                listenerName,
+                listenerAvatar: listenerAvatar || 'avatar_1',
+                duration: String(statusRes.duration_seconds || secondsRef.current),
+                cost: '0',
+                isListener: 'true',
+              },
+            });
+          }
+        } catch (e) {}
+      }, 3000);
+    } else {
+      startCall();
+    }
+
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (dotsRef.current) clearInterval(dotsRef.current);
@@ -60,7 +94,11 @@ export default function CallScreen() {
 
   const startActiveCall = () => {
     if (dotsRef.current) clearInterval(dotsRef.current);
-    if (pollRef.current) clearInterval(pollRef.current);
+    // Only clear the seeker's accept-polling (not the listener's end-detection poll)
+    if (!isListener && pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
     statusRef.current = 'active';
     setStatus('active');
     // Start pulse animation for active call
@@ -73,6 +111,7 @@ export default function CallScreen() {
     timerRef.current = setInterval(() => {
       setSeconds(prev => {
         const newSec = prev + 1;
+        secondsRef.current = newSec;
         if (newSec <= 5) {
           setCost(0);
         } else {
@@ -155,23 +194,41 @@ export default function CallScreen() {
     const wasConnected = statusRef.current === 'active';
     statusRef.current = 'ended';
     setStatus('ended');
+    const currentCallId = callId || callIdRef.current;
     try {
-      const res = await api.post('/calls/end', { call_id: callId || callIdRef.current });
+      const res = await api.post('/calls/end', { call_id: currentCallId });
+
+      if (isListener) {
+        // Listener always goes to rating after an active call
+        router.replace({
+          pathname: '/rating',
+          params: {
+            callId: currentCallId,
+            listenerName,
+            listenerAvatar: listenerAvatar || 'avatar_1',
+            duration: String(res.duration_seconds || secondsRef.current),
+            cost: '0',
+            isListener: 'true',
+          },
+        });
+        return;
+      }
+
       if (!wasConnected) {
-        // Call was cancelled before listener accepted — no rating needed
+        // Seeker cancelled before listener accepted — no rating needed
         router.back();
         return;
       }
       router.replace({
         pathname: '/rating',
         params: {
-          callId: callId || callIdRef.current, listenerId, listenerName, listenerAvatar,
+          callId: currentCallId, listenerId, listenerName, listenerAvatar,
           duration: String(res.duration_seconds || seconds),
           cost: String(res.cost || cost),
         },
       });
     } catch (e: any) {
-      router.back();
+      router.replace(isListener ? '/listener/dashboard' : '/seeker/home');
     }
   };
 
@@ -223,9 +280,11 @@ export default function CallScreen() {
             ))}
           </View>
 
-          <TouchableOpacity testID="cancel-connecting-btn" style={styles.cancelBtn} onPress={endCall}>
-            <Text style={styles.cancelText}>Cancel</Text>
-          </TouchableOpacity>
+          {status !== 'ended' && (
+            <TouchableOpacity testID="cancel-connecting-btn" style={styles.cancelBtn} onPress={endCall}>
+              <Text style={styles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </SafeAreaView>
     );
@@ -247,9 +306,15 @@ export default function CallScreen() {
                 <Text style={styles.hmsText}>100ms</Text>
               </View>
             )}
-            {ratePerMin === 1 && (
+            {ratePerMin === 1 && !isListener && (
               <View style={styles.discountPill}>
                 <Text style={styles.discountText}>{t('first_call_discount')}</Text>
+              </View>
+            )}
+            {callType === 'video' && (
+              <View style={styles.videoPill}>
+                <Ionicons name="videocam" size={12} color="#BB8FCE" />
+                <Text style={styles.videoText}>Video</Text>
               </View>
             )}
           </View>
@@ -270,12 +335,24 @@ export default function CallScreen() {
 
         <View style={styles.timerSection}>
           <Text style={styles.timer} testID="call-timer">{formatTime(seconds)}</Text>
-          <Text style={styles.costDisplay} testID="call-cost">
-            {seconds <= 5 ? t('free_under_5s') : `₹${cost.toFixed(1)} ${t('spent')}`}
-          </Text>
-          <Text style={styles.rateDisplay}>{callType === 'video' ? '₹8' : `₹${ratePerMin}`}/min</Text>
-          {seconds <= 5 && seconds > 0 && (
-            <View style={styles.freeBadge}><Ionicons name="gift" size={12} color="#48BB78" /><Text style={styles.freeText}>Free trial: {5 - seconds}s left</Text></View>
+          {!isListener && (
+            <>
+              <Text style={styles.costDisplay} testID="call-cost">
+                {seconds <= 5 ? t('free_under_5s') : `₹${cost.toFixed(1)} ${t('spent')}`}
+              </Text>
+              <Text style={styles.rateDisplay}>{callType === 'video' ? '₹8' : `₹${ratePerMin}`}/min</Text>
+              {seconds <= 5 && seconds > 0 && (
+                <View style={styles.freeBadge}><Ionicons name="gift" size={12} color="#48BB78" /><Text style={styles.freeText}>Free trial: {5 - seconds}s left</Text></View>
+              )}
+            </>
+          )}
+          {isListener && seconds < 300 && (
+            <Text style={styles.videoUnlockHint}>
+              {Math.ceil((300 - seconds) / 60)}min left to unlock video with this caller
+            </Text>
+          )}
+          {isListener && seconds >= 300 && (
+            <Text style={styles.videoUnlockReady}>Rate great/good to unlock video!</Text>
           )}
         </View>
 
@@ -288,18 +365,20 @@ export default function CallScreen() {
             <Ionicons name={isSpeaker ? 'volume-high' : 'volume-medium'} size={24} color={isSpeaker ? '#fff' : '#4A5568'} />
             <Text style={[styles.controlLabel, isSpeaker && styles.controlLabelActive]}>{t('speaker')}</Text>
           </TouchableOpacity>
-          <TouchableOpacity testID="report-btn" style={styles.controlBtn} onPress={() => Alert.alert(t('report'), 'Report this listener?', [
-            { text: 'Cancel' },
-            { text: t('report'), style: 'destructive', onPress: async () => {
-              try {
-                await api.post('/reports/submit', { reported_user_id: listenerId, call_id: callId, reason: 'Inappropriate behavior' });
-                Alert.alert('Reported', 'Thank you. We will review.');
-              } catch (err) {}
-            }},
-          ])}>
-            <Ionicons name="flag" size={24} color="#F56565" />
-            <Text style={styles.controlLabel}>{t('report')}</Text>
-          </TouchableOpacity>
+          {!isListener && (
+            <TouchableOpacity testID="report-btn" style={styles.controlBtn} onPress={() => Alert.alert(t('report'), 'Report this listener?', [
+              { text: 'Cancel' },
+              { text: t('report'), style: 'destructive', onPress: async () => {
+                try {
+                  await api.post('/reports/submit', { reported_user_id: listenerId, call_id: callId, reason: 'Inappropriate behavior' });
+                  Alert.alert('Reported', 'Thank you. We will review.');
+                } catch (err) {}
+              }},
+            ])}>
+              <Ionicons name="flag" size={24} color="#F56565" />
+              <Text style={styles.controlLabel}>{t('report')}</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         <TouchableOpacity testID="end-call-btn" style={styles.endCallBtn} onPress={endCall} activeOpacity={0.85}>
@@ -341,6 +420,8 @@ const styles = StyleSheet.create({
   hmsText: { fontSize: 10, fontWeight: '700', color: '#48BB78' },
   discountPill: { backgroundColor: '#F6E05E', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
   discountText: { fontSize: 11, fontWeight: '700', color: '#744210' },
+  videoPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#F3E8FF', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  videoText: { fontSize: 10, fontWeight: '700', color: '#BB8FCE' },
   avatarSection: { alignItems: 'center' },
   avatarRing: { width: 140, height: 140, borderRadius: 70, borderWidth: 3, alignItems: 'center', justifyContent: 'center' },
   avatarCircle: { width: 120, height: 120, borderRadius: 60, alignItems: 'center', justifyContent: 'center' },
@@ -354,6 +435,8 @@ const styles = StyleSheet.create({
   rateDisplay: { fontSize: 12, color: '#718096', marginTop: 2 },
   freeBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#E6FFED', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, marginTop: 8 },
   freeText: { fontSize: 11, fontWeight: '600', color: '#48BB78' },
+  videoUnlockHint: { fontSize: 12, color: '#BB8FCE', fontWeight: '500', marginTop: 8, textAlign: 'center' },
+  videoUnlockReady: { fontSize: 12, color: '#48BB78', fontWeight: '700', marginTop: 8, textAlign: 'center' },
   controls: { flexDirection: 'row', gap: 32 },
   controlBtn: { alignItems: 'center', gap: 6, width: 60, paddingVertical: 10, borderRadius: 16 },
   controlBtnActive: { backgroundColor: '#4A5568' },
