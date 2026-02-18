@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Animated, Alert, Dimensions,
 } from 'react-native';
+import { WebView } from 'react-native-webview';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -11,11 +12,78 @@ import { t } from '../src/i18n';
 
 const { width } = Dimensions.get('window');
 
+// Build the HTML page that joins a 100ms room for audio using the web SDK.
+// This runs inside a hidden WebView so no native module rebuild is needed.
+function getHmsHtml(token: string): string {
+  return `<!DOCTYPE html>
+<html><head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>body{margin:0;padding:0;background:transparent;}</style>
+</head>
+<body>
+<script>
+(function() {
+  var AUTH_TOKEN = ${JSON.stringify(token)};
+  function post(obj) {
+    try { window.ReactNativeWebView.postMessage(JSON.stringify(obj)); } catch(e) {}
+  }
+  function loadSdk(src, cb) {
+    var s = document.createElement('script');
+    s.src = src;
+    s.onload = cb;
+    s.onerror = function() { post({ type: 'error', message: 'SDK CDN load failed: ' + src }); };
+    document.head.appendChild(s);
+  }
+  loadSdk(
+    'https://cdn.jsdelivr.net/npm/@100mslive/hms-video-store@0.10.15/build/hms-video-store.umd.min.js',
+    function() {
+      try {
+        var store = new window.HMSReactiveStore();
+        window.hmsActions = store.getActions();
+        window.hmsActions.join({
+          userName: 'user_' + Date.now(),
+          authToken: AUTH_TOKEN,
+          settings: { isAudioMuted: false, isVideoMuted: true }
+        }).then(function() {
+          post({ type: 'joined' });
+        }).catch(function(err) {
+          post({ type: 'error', message: String(err) });
+        });
+      } catch(err) {
+        post({ type: 'error', message: String(err) });
+      }
+    }
+  );
+  // Handle messages from React Native (mute / leave)
+  document.addEventListener('message', function(e) {
+    try {
+      var data = JSON.parse(e.data);
+      if (data.type === 'mute' && window.hmsActions)
+        window.hmsActions.setLocalAudioEnabled(!data.muted);
+      if (data.type === 'leave' && window.hmsActions)
+        window.hmsActions.leave().catch(function(){});
+    } catch(err) {}
+  });
+  // iOS uses window.addEventListener instead
+  window.addEventListener('message', function(e) {
+    try {
+      var data = JSON.parse(e.data);
+      if (data.type === 'mute' && window.hmsActions)
+        window.hmsActions.setLocalAudioEnabled(!data.muted);
+      if (data.type === 'leave' && window.hmsActions)
+        window.hmsActions.leave().catch(function(){});
+    } catch(err) {}
+  });
+})();
+</script>
+</body></html>`;
+}
+
 export default function CallScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{
     listenerId: string; listenerName: string; listenerAvatar: string; callType: string;
-    callId: string; isListener: string;
+    callId: string; isListener: string; hmsToken: string; hmsRoomId: string;
   }>();
   const { listenerId, listenerName, listenerAvatar, callType } = params;
   // isListener='true' means this is the listener side of the call (already accepted)
@@ -28,7 +96,9 @@ export default function CallScreen() {
   const statusRef = useRef<'connecting' | 'ringing' | 'active' | 'ended'>('connecting');
   const [cost, setCost] = useState(0);
   const [ratePerMin, setRatePerMin] = useState(5);
-  const [hmsRoomId, setHmsRoomId] = useState('');
+  // HMS (100ms) state — token received from either startCall or accept response
+  const [hmsToken, setHmsToken] = useState(params.hmsToken || '');
+  const [hmsRoomId, setHmsRoomId] = useState(params.hmsRoomId || '');
   const [hmsConnected, setHmsConnected] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isSpeaker, setIsSpeaker] = useState(false);
@@ -41,6 +111,10 @@ export default function CallScreen() {
   const callIdRef = useRef(isListener ? presetCallId : '');
   const rateRef = useRef(5);
   const secondsRef = useRef(0);
+  // Prevents double-tap on end button and avoids re-entering endCall
+  const endingRef = useRef(false);
+  // Reference to the hidden audio WebView
+  const webviewRef = useRef<WebView>(null);
 
   const colors = AVATAR_COLORS[listenerAvatar || 'avatar_1'] || AVATAR_COLORS.avatar_1;
 
@@ -94,11 +168,37 @@ export default function CallScreen() {
 
   const startActiveCall = () => {
     if (dotsRef.current) clearInterval(dotsRef.current);
-    // Only clear the seeker's accept-polling (not the listener's end-detection poll)
-    if (!isListener && pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
+
+    if (!isListener) {
+      // Clear the ringing-phase poll and replace it with an active-call poll
+      // so the seeker learns when the listener hangs up.
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(async () => {
+        try {
+          const statusRes = await api.get(`/calls/status/${callIdRef.current}`);
+          if (statusRes.status === 'ended' || statusRes.status === 'missed') {
+            if (pollRef.current) clearInterval(pollRef.current);
+            if (timerRef.current) clearInterval(timerRef.current);
+            // Leave the HMS room cleanly
+            webviewRef.current?.injectJavaScript(
+              'if(window.hmsActions){window.hmsActions.leave().catch(function(){});}true;'
+            );
+            const duration = statusRes.duration_seconds ?? secondsRef.current;
+            const callCost = statusRes.cost ?? 0;
+            router.replace({
+              pathname: '/rating',
+              params: {
+                callId: callIdRef.current, listenerId, listenerName,
+                listenerAvatar: listenerAvatar || 'avatar_1',
+                duration: String(duration),
+                cost: String(callCost),
+              },
+            });
+          }
+        } catch (e) {}
+      }, 3000);
     }
+
     statusRef.current = 'active';
     setStatus('active');
     // Start pulse animation for active call
@@ -140,7 +240,10 @@ export default function CallScreen() {
         rateRef.current = res.call.rate_per_min;
         if (res.call.hms_room_id) {
           setHmsRoomId(res.call.hms_room_id);
-          setHmsConnected(true);
+        }
+        // Save the seeker's HMS token so the WebView can join the room once active
+        if (res.call.hms_token) {
+          setHmsToken(res.call.hms_token);
         }
         // Transition to ringing state - waiting for listener to accept
         statusRef.current = 'ringing';
@@ -188,12 +291,25 @@ export default function CallScreen() {
   };
 
   const endCall = async () => {
+    // Prevent double-tap / re-entrant calls
+    if (endingRef.current) return;
+    endingRef.current = true;
+
     if (timerRef.current) clearInterval(timerRef.current);
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = null;
     const wasConnected = statusRef.current === 'active';
     statusRef.current = 'ended';
-    setStatus('ended');
+    // NOTE: We intentionally do NOT call setStatus('ended') here.
+    // Setting status to 'ended' before navigating would briefly re-render the
+    // "Connecting..." screen while the API call is in flight, causing the flash
+    // reported in Issue 3. Navigation happens immediately after the API call.
+
+    // Cleanly leave the HMS room
+    webviewRef.current?.injectJavaScript(
+      'if(window.hmsActions){window.hmsActions.leave().catch(function(){});}true;'
+    );
+
     const currentCallId = callId || callIdRef.current;
     try {
       const res = await api.post('/calls/end', { call_id: currentCallId });
@@ -293,6 +409,39 @@ export default function CallScreen() {
   // ACTIVE CALL SCREEN
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]} testID="call-screen">
+      {/*
+        Hidden WebView that joins the 100ms room for real audio.
+        react-native-webview is already installed; this avoids needing a
+        native SDK rebuild while still delivering WebRTC audio via the web SDK.
+      */}
+      {hmsToken !== '' && (
+        <WebView
+          ref={webviewRef}
+          source={{ html: getHmsHtml(hmsToken) }}
+          style={styles.hiddenWebView}
+          allowsInlineMediaPlayback
+          mediaPlaybackRequiresUserAction={false}
+          javaScriptEnabled
+          domStorageEnabled
+          originWhitelist={['*']}
+          allowUniversalAccessFromFileURLs
+          // Grant microphone permission requests automatically on Android
+          onPermissionRequest={(evt) => {
+            evt.nativeEvent.grant(evt.nativeEvent.resources);
+          }}
+          onMessage={(evt) => {
+            try {
+              const msg = JSON.parse(evt.nativeEvent.data);
+              if (msg.type === 'joined') {
+                setHmsConnected(true);
+              } else if (msg.type === 'error') {
+                console.warn('[HMS WebView]', msg.message);
+              }
+            } catch {}
+          }}
+        />
+      )}
+
       <View style={styles.content}>
         <View style={styles.topBar}>
           <View style={styles.statusPill}>
@@ -357,7 +506,18 @@ export default function CallScreen() {
         </View>
 
         <View style={styles.controls}>
-          <TouchableOpacity testID="mute-btn" style={[styles.controlBtn, isMuted && styles.controlBtnActive]} onPress={() => setIsMuted(!isMuted)}>
+          <TouchableOpacity
+            testID="mute-btn"
+            style={[styles.controlBtn, isMuted && styles.controlBtnActive]}
+            onPress={() => {
+              const newMuted = !isMuted;
+              setIsMuted(newMuted);
+              // Relay mute state to the HMS WebView
+              webviewRef.current?.injectJavaScript(
+                `if(window.hmsActions){window.hmsActions.setLocalAudioEnabled(${!newMuted});}true;`
+              );
+            }}
+          >
             <Ionicons name={isMuted ? 'mic-off' : 'mic'} size={24} color={isMuted ? '#fff' : '#4A5568'} />
             <Text style={[styles.controlLabel, isMuted && styles.controlLabelActive]}>{isMuted ? t('unmute') : t('mute')}</Text>
           </TouchableOpacity>
@@ -392,6 +552,8 @@ export default function CallScreen() {
 }
 
 const styles = StyleSheet.create({
+  // Hidden WebView for HMS audio — positioned off-screen, 1×1 px
+  hiddenWebView: { position: 'absolute', top: -9999, left: -9999, width: 1, height: 1 },
   // Connecting screen styles
   connectingContainer: { flex: 1 },
   connectingContent: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 },

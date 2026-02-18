@@ -971,6 +971,8 @@ async def get_call_status(call_id: str, user=Depends(get_current_user)):
         "call_id": call_id,
         "status": call["status"],
         "connected_at": call.get("connected_at"),
+        "duration_seconds": call.get("duration_seconds", 0),
+        "cost": call.get("cost", 0),
     }
 
 @api_router.get("/calls/check-incoming")
