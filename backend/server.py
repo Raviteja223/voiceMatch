@@ -488,8 +488,8 @@ async def get_leaderboard(period: str = "weekly", user=Depends(get_current_user)
             period_calls[listener_id] = 0
         
         duration = call.get("duration_seconds", 0)
-        # Calculate listener earnings (₹3/min voice, ₹5/min video)
-        rate = 5 if call.get("is_video") else 3
+        # Calculate listener earnings (₹2.5/min voice, ₹5/min video)
+        rate = 5 if call.get("call_type") == "video" else 2.5
         earnings = (duration / 60) * rate
         period_earnings[listener_id] += earnings
         period_minutes[listener_id] += duration / 60
@@ -633,7 +633,7 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
     # Check first call discount
     prev_calls = await db.calls.count_documents({"seeker_id": user["user_id"]})
     is_first_call = prev_calls == 0
-    rate = 1 if is_first_call else (5 if req.call_type == "voice" else 8)
+    rate = 1 if is_first_call else (5 if req.call_type == "voice" else 10)
     call_id = uid()
 
     # Create 100ms room for the call
@@ -822,7 +822,7 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
             else:
                 # First 5 min at ₹1/min + rest at normal rate
                 cost = 5.0  # 5 minutes at ₹1
-                normal_rate = 5 if call["call_type"] == "voice" else 8
+                normal_rate = 5 if call["call_type"] == "voice" else 10
                 cost += ((duration - 300) / 60) * normal_rate
         else:
             # Standard billing: full first minute charge + per-second after
@@ -852,7 +852,7 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
             "call_id": req.call_id, "created_at": now()
         })
         # Credit listener earnings
-        listener_rate = 3 if call["call_type"] == "voice" else 5
+        listener_rate = 2.5 if call["call_type"] == "voice" else 5
         earnings = round((duration / 60) * listener_rate, 2)
         await db.listener_earnings.update_one(
             {"user_id": call["listener_id"]},

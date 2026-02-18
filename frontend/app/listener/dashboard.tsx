@@ -222,7 +222,7 @@ export default function ListenerDashboard() {
         <View style={styles.rateInfoCard}>
           <Text style={styles.rateInfoTitle}>{t('earning_rates')}</Text>
           <View style={styles.rateRow}>
-            <View style={styles.rateItem}><Ionicons name="mic" size={16} color="#FF8FA3" /><Text style={styles.rateLabel}>Voice</Text><Text style={styles.rateValue}>₹3/min</Text></View>
+            <View style={styles.rateItem}><Ionicons name="mic" size={16} color="#FF8FA3" /><Text style={styles.rateLabel}>Voice</Text><Text style={styles.rateValue}>₹2.5/min</Text></View>
             <View style={styles.rateItem}><Ionicons name="videocam" size={16} color="#BB8FCE" /><Text style={styles.rateLabel}>Video</Text><Text style={styles.rateValue}>₹5/min</Text></View>
           </View>
         </View>

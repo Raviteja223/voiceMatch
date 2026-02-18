@@ -340,7 +340,7 @@ export default function CallScreen() {
               <Text style={styles.costDisplay} testID="call-cost">
                 {seconds <= 5 ? t('free_under_5s') : `₹${cost.toFixed(1)} ${t('spent')}`}
               </Text>
-              <Text style={styles.rateDisplay}>{callType === 'video' ? '₹8' : `₹${ratePerMin}`}/min</Text>
+              <Text style={styles.rateDisplay}>{callType === 'video' ? '₹10' : `₹${ratePerMin}`}/min</Text>
               {seconds <= 5 && seconds > 0 && (
                 <View style={styles.freeBadge}><Ionicons name="gift" size={12} color="#48BB78" /><Text style={styles.freeText}>Free trial: {5 - seconds}s left</Text></View>
               )}

@@ -272,7 +272,7 @@ export default function SeekerHome() {
               </View>
               <View style={styles.callTypeBtnInfo}>
                 <Text style={[styles.callTypeBtnLabel, { color: '#BB8FCE' }]}>Video Call</Text>
-                <Text style={styles.callTypeBtnSub}>₹8/min · Face to face</Text>
+                <Text style={styles.callTypeBtnSub}>₹10/min · Face to face</Text>
               </View>
               <Ionicons name="chevron-forward" size={18} color="#A0AEC0" />
             </TouchableOpacity>

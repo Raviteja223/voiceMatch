@@ -66,7 +66,7 @@ export default function WalletScreen() {
               <View style={styles.rateInfo}>
                 <View style={styles.rateItem}><Ionicons name="mic" size={14} color="#FF8FA3" /><Text style={styles.rateText}>Voice ₹5/min</Text></View>
                 <View style={styles.rateDivider} />
-                <View style={styles.rateItem}><Ionicons name="videocam" size={14} color="#BB8FCE" /><Text style={styles.rateText}>Video ₹8/min</Text></View>
+                <View style={styles.rateItem}><Ionicons name="videocam" size={14} color="#BB8FCE" /><Text style={styles.rateText}>Video ₹10/min</Text></View>
               </View>
             </View>
             <Text style={styles.sectionTitle}>Recharge Packs</Text>
