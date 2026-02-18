@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -13,6 +13,8 @@ import jwt
 import random
 import httpx
 from datetime import datetime, timezone, timedelta
+import asyncio
+import json
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -116,6 +118,20 @@ class KYCUploadIDRequest(BaseModel):
 
 class KYCSelfieVideoRequest(BaseModel):
     video_base64: str  # base64 encoded video or image frames
+
+class RefundRequest(BaseModel):
+    call_id: str
+    reason: str
+    amount: Optional[float] = None  # None = full call cost
+
+class TipRequest(BaseModel):
+    amount: float  # ₹5 minimum, ₹500 maximum
+
+class SubscribeRequest(BaseModel):
+    plan_id: str  # basic_monthly, premium_monthly
+
+class RematchRequest(BaseModel):
+    call_id: str  # missed/rejected call to rematch from
 
 # ─── HELPERS ───────────────────────────────────────────
 def create_token(user_id: str, role: str) -> str:
@@ -284,6 +300,58 @@ async def cleanup_expired_recordings():
     result = await db.call_recordings.delete_many({"expires_at": {"$lt": cutoff}})
     if result.deleted_count:
         logger.info(f"Cleaned up {result.deleted_count} expired recordings")
+
+# ─── SUBSCRIPTION & PROMO CONSTANTS ────────────────────
+SUBSCRIPTION_PLANS = {
+    "basic_monthly": {
+        "price": 199, "credits": 50,
+        "discount_pct": 10,  # 10% off per-minute call rate
+        "name": "Basic Monthly", "duration_days": 30,
+    },
+    "premium_monthly": {
+        "price": 499, "credits": 150,
+        "discount_pct": 20,  # 20% off per-minute call rate
+        "name": "Premium Monthly", "duration_days": 30,
+    },
+}
+
+# IST = UTC + 5:30.  Happy hour 14:00–16:00 IST = 08:30–10:30 UTC
+HAPPY_HOUR_UTC_START = 8   # 08:30 UTC ≈ 14:00 IST (approximate to whole hour)
+HAPPY_HOUR_UTC_END   = 10  # 10:30 UTC ≈ 16:00 IST
+HAPPY_HOUR_BONUS_PCT = 20  # 20 % bonus credits during happy hour
+
+STREAK_BUNDLE = {
+    "pack_299": {"bonus_pct": 10, "label": "+10% bonus credits"},
+    "pack_699": {"bonus_pct": 15, "label": "+15% bonus credits"},
+}
+
+# ─── WEBSOCKET MANAGER ─────────────────────────────────
+# In-memory map: user_id → active WebSocket (listeners AND seekers share this)
+_active_ws: dict = {}
+
+async def _ws_push(user_id: str, payload: dict):
+    """Push a JSON event to a connected WebSocket client, if any."""
+    ws = _active_ws.get(user_id)
+    if ws:
+        try:
+            await ws.send_text(json.dumps(payload))
+        except Exception as e:
+            logger.warning(f"WS push failed for {user_id[:8]}: {e}")
+            _active_ws.pop(user_id, None)
+
+async def _update_listener_answer_rate(listener_id: str):
+    """Recalculate and store answer_rate for a listener."""
+    profile = await db.listener_profiles.find_one({"user_id": listener_id}, {"_id": 0})
+    if not profile:
+        return
+    answered = profile.get("calls_answered", 0)
+    rejected = profile.get("calls_rejected", 0)
+    total = answered + rejected
+    if total > 0:
+        rate = round(answered / total, 3)
+        await db.listener_profiles.update_one(
+            {"user_id": listener_id}, {"$set": {"answer_rate": rate}}
+        )
 
 # ─── AUTH ──────────────────────────────────────────────
 @api_router.post("/auth/send-otp")
@@ -596,6 +664,8 @@ async def talk_now(user=Depends(get_current_user)):
         # Tier bonus
         if l.get("tier") == "trusted": score += 2
         elif l.get("tier") == "elite": score += 4
+        # Answer-rate bonus: reward listeners who actually pick up (up to +20 pts)
+        score += l.get("answer_rate", 0.5) * 20
         # FAIRNESS: Penalize recently matched listeners (spread calls across all)
         last_matched = l.get("last_matched_at")
         if last_matched:
@@ -634,6 +704,17 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
     prev_calls = await db.calls.count_documents({"seeker_id": user["user_id"]})
     is_first_call = prev_calls == 0
     rate = 1 if is_first_call else (5 if req.call_type == "voice" else 10)
+
+    # Apply active subscription discount on non-first calls
+    if not is_first_call:
+        active_sub = await db.subscriptions.find_one(
+            {"user_id": user["user_id"], "status": "active", "expires_at": {"$gt": now()}},
+            {"_id": 0}
+        )
+        if active_sub:
+            discount = active_sub.get("discount_pct", 0)
+            rate = round(rate * (1 - discount / 100), 2)
+
     call_id = uid()
 
     # Create 100ms room for the call
@@ -674,6 +755,16 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
     await db.calls.insert_one(call)
     call.pop("_id", None)
 
+    # Push real-time incoming-call notification to listener (if connected via WebSocket)
+    seeker_profile_ws = await db.seeker_profiles.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    caller_name = seeker_profile_ws.get("name", "Someone") if seeker_profile_ws else "Someone"
+    await _ws_push(req.listener_id, {
+        "event": "incoming_call",
+        "call_id": call_id,
+        "caller_name": caller_name,
+        "call_type": req.call_type,
+    })
+
     # Return call data with 100ms token for seeker
     call["hms_token"] = seeker_hms_token
     return {"success": True, "call": call}
@@ -697,8 +788,17 @@ async def accept_call(req: CallAcceptRequest, user=Depends(get_current_user)):
     )
     # Mark listener as in_call now that they actually accepted
     await db.listener_profiles.update_one(
-        {"user_id": user["user_id"]}, {"$set": {"in_call": True}}
+        {"user_id": user["user_id"]},
+        {"$set": {"in_call": True}, "$inc": {"calls_answered": 1}}
     )
+    await _update_listener_answer_rate(user["user_id"])
+
+    # Notify seeker that their call was accepted
+    await _ws_push(call["seeker_id"], {
+        "event": "call_accepted",
+        "call_id": req.call_id,
+        "connected_at": connected_at,
+    })
     # Get the listener's HMS token
     token_doc = await db.hms_call_tokens.find_one(
         {"call_id": req.call_id, "listener_id": user["user_id"]}, {"_id": 0}
@@ -727,10 +827,20 @@ async def reject_call(req: CallRejectRequest, user=Depends(get_current_user)):
         {"id": req.call_id},
         {"$set": {"status": "rejected", "ended_at": now(), "duration_seconds": 0, "cost": 0}}
     )
+    # Track rejection for answer-rate calculation
+    await db.listener_profiles.update_one(
+        {"user_id": user["user_id"]}, {"$inc": {"calls_rejected": 1}}
+    )
+    await _update_listener_answer_rate(user["user_id"])
     # Clean up HMS resources
     if call.get("hms_room_id"):
         await end_hms_room(call["hms_room_id"])
         await db.hms_call_tokens.delete_many({"call_id": req.call_id})
+    # Notify seeker so they can rematch immediately
+    await _ws_push(call["seeker_id"], {
+        "event": "call_rejected",
+        "call_id": req.call_id,
+    })
     return {"success": True, "message": "Call rejected"}
 
 @api_router.get("/calls/status/{call_id}")
@@ -831,26 +941,62 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
                 cost += ((duration - 60) / 60) * rate
         cost = round(cost, 2)
 
-    await db.calls.update_one({"id": req.call_id}, {"$set": {
-        "status": "ended",
-        "ended_at": ended.isoformat(),
-        "duration_seconds": duration,
-        "cost": cost
-    }})
+    # ── Atomic status transition: prevents parallel/retry double-charge ─────────
+    # Only transitions call if it is STILL "active". If another concurrent
+    # request already closed it, modified_count == 0 and we return early.
+    status_result = await db.calls.update_one(
+        {"id": req.call_id, "status": "active"},
+        {"$set": {
+            "status": "ended",
+            "ended_at": ended.isoformat(),
+            "duration_seconds": duration,
+            "cost": cost,
+        }}
+    )
+    if status_result.modified_count == 0:
+        call_final = await db.calls.find_one({"id": req.call_id}, {"_id": 0})
+        return {
+            "success": True,
+            "duration_seconds": call_final.get("duration_seconds", 0) if call_final else duration,
+            "cost": call_final.get("cost", 0) if call_final else 0,
+            "listener_earned": 0,
+        }
 
     earnings = 0
     if cost > 0:
-        # Deduct from seeker wallet
-        await db.wallet_accounts.update_one(
-            {"user_id": call["seeker_id"]},
+        # ── Atomic balance guard: prevents negative balance ───────────────────
+        # Attempt full debit only when balance is sufficient.
+        original_cost = cost
+        debit_result = await db.wallet_accounts.update_one(
+            {"user_id": call["seeker_id"], "balance": {"$gte": cost}},
             {"$inc": {"balance": -cost}}
         )
-        await db.wallet_ledger.insert_one({
-            "id": uid(), "user_id": call["seeker_id"],
-            "type": "debit", "amount": cost,
-            "description": f"Call ({call['call_type']}) - {duration}s",
-            "call_id": req.call_id, "created_at": now()
-        })
+        if debit_result.modified_count == 0:
+            # Insufficient balance — charge only what is available, floor at ₹0
+            wallet_now = await db.wallet_accounts.find_one({"user_id": call["seeker_id"]})
+            available = round(max(wallet_now.get("balance", 0), 0), 2) if wallet_now else 0
+            if available > 0:
+                await db.wallet_accounts.update_one(
+                    {"user_id": call["seeker_id"]},
+                    {"$set": {"balance": 0}}
+                )
+                cost = available
+            else:
+                cost = 0
+            logger.warning(
+                f"Balance shortfall: seeker {call['seeker_id'][:8]} "
+                f"charged ₹{cost} (billed ₹{original_cost}) – partial debit"
+            )
+            # Correct the call record with the actual amount charged
+            await db.calls.update_one({"id": req.call_id}, {"$set": {"cost": cost}})
+
+        if cost > 0:
+            await db.wallet_ledger.insert_one({
+                "id": uid(), "user_id": call["seeker_id"],
+                "type": "debit", "amount": cost,
+                "description": f"Call ({call['call_type']}) - {duration}s",
+                "call_id": req.call_id, "created_at": now()
+            })
         # Credit listener earnings
         listener_rate = 2.5 if call["call_type"] == "voice" else 5
         earnings = round((duration / 60) * listener_rate, 2)
@@ -952,22 +1098,51 @@ async def get_balance(user=Depends(get_current_user)):
 @api_router.post("/wallet/recharge")
 async def recharge(req: RechargeRequest, user=Depends(get_current_user)):
     packs = {"pack_99": 99, "pack_299": 299, "pack_699": 699}
-    amount = packs.get(req.pack_id)
-    if not amount:
+    base_amount = packs.get(req.pack_id)
+    if not base_amount:
         raise HTTPException(status_code=400, detail="Invalid pack")
+
+    # Happy-hour bonus (14:00–16:00 IST ≈ 08:30–10:30 UTC)
+    now_utc = datetime.now(timezone.utc)
+    bonus_credits = 0
+    bonus_reasons = []
+    if HAPPY_HOUR_UTC_START <= now_utc.hour < HAPPY_HOUR_UTC_END:
+        hh_bonus = round(base_amount * HAPPY_HOUR_BONUS_PCT / 100)
+        bonus_credits += hh_bonus
+        bonus_reasons.append(f"Happy-hour +{HAPPY_HOUR_BONUS_PCT}% ({hh_bonus} credits)")
+
+    # Streak bundle bonus for pack_299 and pack_699
+    bundle = STREAK_BUNDLE.get(req.pack_id)
+    if bundle:
+        bun_bonus = round(base_amount * bundle["bonus_pct"] / 100)
+        bonus_credits += bun_bonus
+        bonus_reasons.append(f"Bundle offer {bundle['label']} ({bun_bonus} credits)")
+
+    total_credits = base_amount + bonus_credits
+    description = f"Recharge ₹{base_amount}"
+    if bonus_reasons:
+        description += " + " + " + ".join(bonus_reasons)
+
     # Mocked payment - always success
     await db.wallet_accounts.update_one(
         {"user_id": user["user_id"]},
-        {"$inc": {"balance": amount}},
+        {"$inc": {"balance": total_credits}},
         upsert=True
     )
     await db.wallet_ledger.insert_one({
         "id": uid(), "user_id": user["user_id"],
-        "type": "credit", "amount": amount,
-        "description": f"Recharge ₹{amount}", "created_at": now()
+        "type": "credit", "amount": total_credits,
+        "description": description, "created_at": now()
     })
     wallet = await db.wallet_accounts.find_one({"user_id": user["user_id"]}, {"_id": 0})
-    return {"success": True, "new_balance": wallet.get("balance", 0)}
+    return {
+        "success": True,
+        "base_credits": base_amount,
+        "bonus_credits": bonus_credits,
+        "total_credits": total_credits,
+        "bonus_reasons": bonus_reasons,
+        "new_balance": wallet.get("balance", 0),
+    }
 
 @api_router.get("/wallet/transactions")
 async def get_transactions(user=Depends(get_current_user)):
@@ -975,6 +1150,152 @@ async def get_transactions(user=Depends(get_current_user)):
         {"user_id": user["user_id"]}, {"_id": 0}
     ).sort("created_at", -1).to_list(100)
     return {"transactions": txns}
+
+@api_router.get("/wallet/promos")
+async def get_wallet_promos(user=Depends(get_current_user)):
+    """Return currently active promo offers (happy-hour, streak bundles)."""
+    now_utc = datetime.now(timezone.utc)
+    happy_hour_active = HAPPY_HOUR_UTC_START <= now_utc.hour < HAPPY_HOUR_UTC_END
+
+    promos = []
+    if happy_hour_active:
+        promos.append({
+            "id": "happy_hour",
+            "title": "Happy Hour",
+            "description": f"+{HAPPY_HOUR_BONUS_PCT}% bonus credits on any recharge right now",
+            "bonus_pct": HAPPY_HOUR_BONUS_PCT,
+            "active": True,
+        })
+    for pack_id, bundle in STREAK_BUNDLE.items():
+        pack_amount = {"pack_299": 299, "pack_699": 699}.get(pack_id, 0)
+        promos.append({
+            "id": f"bundle_{pack_id}",
+            "title": f"Bundle – ₹{pack_amount}",
+            "description": f"Recharge ₹{pack_amount} and get {bundle['label']}",
+            "bonus_pct": bundle["bonus_pct"],
+            "applies_to": pack_id,
+            "active": True,
+        })
+    return {"promos": promos, "happy_hour_active": happy_hour_active}
+
+@api_router.post("/wallet/refund")
+async def refund_call_charge(req: RefundRequest, user=Depends(get_current_user)):
+    """Refund a call charge back to the seeker's wallet (idempotent — one refund per call)."""
+    call = await db.calls.find_one({"id": req.call_id}, {"_id": 0})
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    if call["seeker_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Not your call")
+    if call.get("cost", 0) <= 0:
+        raise HTTPException(status_code=400, detail="No charge to refund")
+
+    # Idempotency: only one refund per call
+    existing_refund = await db.wallet_ledger.find_one({"call_id": req.call_id, "type": "refund"})
+    if existing_refund:
+        raise HTTPException(status_code=409, detail="This call has already been refunded")
+
+    refund_amount = req.amount if (req.amount and 0 < req.amount <= call["cost"]) else call["cost"]
+    refund_amount = round(refund_amount, 2)
+
+    await db.wallet_accounts.update_one(
+        {"user_id": call["seeker_id"]},
+        {"$inc": {"balance": refund_amount}},
+        upsert=True
+    )
+    await db.wallet_ledger.insert_one({
+        "id": uid(), "user_id": call["seeker_id"],
+        "type": "refund", "amount": refund_amount,
+        "description": f"Refund – {req.reason}",
+        "call_id": req.call_id, "created_at": now()
+    })
+    wallet = await db.wallet_accounts.find_one({"user_id": call["seeker_id"]}, {"_id": 0})
+    return {
+        "success": True,
+        "refunded": refund_amount,
+        "reason": req.reason,
+        "call_id": req.call_id,
+        "new_balance": wallet.get("balance", 0),
+    }
+
+@api_router.post("/wallet/subscribe")
+async def subscribe_plan(req: SubscribeRequest, user=Depends(get_current_user)):
+    """Subscribe to a monthly plan (upfront debit + credit bonus + call-rate discount)."""
+    plan = SUBSCRIPTION_PLANS.get(req.plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown plan. Available: {list(SUBSCRIPTION_PLANS.keys())}"
+        )
+
+    # Block if already subscribed
+    existing = await db.subscriptions.find_one(
+        {"user_id": user["user_id"], "status": "active", "expires_at": {"$gt": now()}}
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="You already have an active subscription")
+
+    # Atomic balance check + debit
+    debit_result = await db.wallet_accounts.update_one(
+        {"user_id": user["user_id"], "balance": {"$gte": plan["price"]}},
+        {"$inc": {"balance": -plan["price"]}}
+    )
+    if debit_result.modified_count == 0:
+        raise HTTPException(status_code=402, detail=f"Insufficient balance. Need ₹{plan['price']}")
+
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=plan["duration_days"])).isoformat()
+    sub = {
+        "id": uid(),
+        "user_id": user["user_id"],
+        "plan_id": req.plan_id,
+        "plan_name": plan["name"],
+        "price_paid": plan["price"],
+        "credits_granted": plan["credits"],
+        "discount_pct": plan["discount_pct"],
+        "status": "active",
+        "started_at": now(),
+        "expires_at": expires_at,
+        "created_at": now(),
+    }
+    await db.subscriptions.insert_one(sub)
+
+    # Grant subscription credits to wallet
+    await db.wallet_accounts.update_one(
+        {"user_id": user["user_id"]},
+        {"$inc": {"balance": plan["credits"]}}
+    )
+    # Ledger entries
+    await db.wallet_ledger.insert_one({
+        "id": uid(), "user_id": user["user_id"],
+        "type": "debit", "amount": plan["price"],
+        "description": f"Subscription: {plan['name']}", "created_at": now()
+    })
+    await db.wallet_ledger.insert_one({
+        "id": uid(), "user_id": user["user_id"],
+        "type": "credit", "amount": plan["credits"],
+        "description": f"Subscription credits: {plan['name']} ({plan['credits']} credits)",
+        "created_at": now()
+    })
+
+    wallet = await db.wallet_accounts.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    return {
+        "success": True,
+        "plan": plan["name"],
+        "credits_added": plan["credits"],
+        "discount_pct": plan["discount_pct"],
+        "expires_at": expires_at,
+        "new_balance": wallet.get("balance", 0),
+    }
+
+@api_router.get("/wallet/subscription")
+async def get_subscription(user=Depends(get_current_user)):
+    """Return the user's active subscription, if any."""
+    sub = await db.subscriptions.find_one(
+        {"user_id": user["user_id"], "status": "active", "expires_at": {"$gt": now()}},
+        {"_id": 0}
+    )
+    if not sub:
+        return {"subscription": None, "discount_pct": 0}
+    return {"subscription": sub, "discount_pct": sub.get("discount_pct", 0)}
 
 # ─── RATINGS ───────────────────────────────────────────
 @api_router.post("/ratings/submit")
@@ -1132,6 +1453,139 @@ async def process_referral_commission(listener_id: str, call_earnings: float):
         {"id": referral["id"]},
         {"$inc": {"total_commission": commission}}
     )
+
+# ─── TIPS ──────────────────────────────────────────────
+@api_router.post("/calls/{call_id}/tip")
+async def tip_listener(call_id: str, req: TipRequest, user=Depends(get_current_user)):
+    """Seeker sends a tip to the listener after a call ends."""
+    if user["role"] != "seeker":
+        raise HTTPException(status_code=403, detail="Seekers only")
+    if req.amount < 5:
+        raise HTTPException(status_code=400, detail="Minimum tip is ₹5")
+    if req.amount > 500:
+        raise HTTPException(status_code=400, detail="Maximum tip is ₹500")
+
+    call = await db.calls.find_one({"id": call_id}, {"_id": 0})
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    if call["seeker_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Not your call")
+    if call["status"] != "ended":
+        raise HTTPException(status_code=400, detail="Can only tip after a call ends")
+
+    # Idempotency: one tip per call
+    existing_tip = await db.wallet_ledger.find_one(
+        {"user_id": user["user_id"], "call_id": call_id, "type": "tip_sent"}
+    )
+    if existing_tip:
+        raise HTTPException(status_code=409, detail="Already tipped this call")
+
+    tip_amount = round(req.amount, 2)
+
+    # Atomic debit from seeker wallet
+    debit_result = await db.wallet_accounts.update_one(
+        {"user_id": user["user_id"], "balance": {"$gte": tip_amount}},
+        {"$inc": {"balance": -tip_amount}}
+    )
+    if debit_result.modified_count == 0:
+        raise HTTPException(status_code=402, detail="Insufficient balance for tip")
+
+    # Credit listener earnings
+    await db.listener_earnings.update_one(
+        {"user_id": call["listener_id"]},
+        {"$inc": {"total_earned": tip_amount, "pending_balance": tip_amount}}
+    )
+    # Ledger entries
+    await db.wallet_ledger.insert_one({
+        "id": uid(), "user_id": user["user_id"],
+        "type": "tip_sent", "amount": tip_amount,
+        "description": "Tip sent after call",
+        "call_id": call_id, "created_at": now()
+    })
+    await db.listener_earnings_ledger.insert_one({
+        "id": uid(), "user_id": call["listener_id"],
+        "type": "tip", "amount": tip_amount,
+        "description": "Tip received",
+        "call_id": call_id, "created_at": now()
+    })
+    wallet = await db.wallet_accounts.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    return {
+        "success": True,
+        "tip_amount": tip_amount,
+        "new_balance": wallet.get("balance", 0),
+    }
+
+# ─── MATCH REMATCH ─────────────────────────────────────
+@api_router.post("/match/rematch")
+async def rematch(req: RematchRequest, user=Depends(get_current_user)):
+    """
+    Find the next best available listener after a call was missed or rejected.
+    Excludes the listener who missed/rejected to avoid routing back to them.
+    Incorporates answer_rate bonus into scoring.
+    """
+    if user["role"] != "seeker":
+        raise HTTPException(status_code=403, detail="Seekers only")
+
+    prev_call = await db.calls.find_one({"id": req.call_id}, {"_id": 0})
+    if not prev_call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    if prev_call["seeker_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Not your call")
+    if prev_call["status"] not in ("missed", "rejected"):
+        raise HTTPException(status_code=400, detail="Can only rematch after a missed or rejected call")
+
+    wallet = await db.wallet_accounts.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    if not wallet or wallet.get("balance", 0) < 5:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
+
+    seeker = await db.seeker_profiles.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    if not seeker:
+        raise HTTPException(status_code=404, detail="Complete onboarding first")
+
+    excluded_listener = prev_call["listener_id"]
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=90)).isoformat()
+    online = await db.listener_profiles.find(
+        {
+            "is_online": True,
+            "in_call": {"$ne": True},
+            "last_online": {"$gte": cutoff},
+            "user_id": {"$ne": excluded_listener},
+        },
+        {"_id": 0}
+    ).to_list(50)
+
+    if not online:
+        raise HTTPException(status_code=404, detail="No other listeners available right now. Try again shortly.")
+
+    scored = []
+    for l in online:
+        score = 0
+        lang_match = set(seeker.get("languages", [])) & set(l.get("languages", []))
+        score += len(lang_match) * 10
+        tag_match = set(seeker.get("intent_tags", [])) & set(l.get("topic_tags", []))
+        score += len(tag_match) * 3
+        if l.get("tier") == "trusted": score += 2
+        elif l.get("tier") == "elite": score += 4
+        # Answer-rate bonus: strongly prefer listeners who pick up
+        score += l.get("answer_rate", 0.5) * 20
+        last_matched = l.get("last_matched_at")
+        if last_matched:
+            try:
+                mins_since = (datetime.now(timezone.utc) - datetime.fromisoformat(last_matched)).total_seconds() / 60
+                score += min(mins_since, 30)
+            except Exception:
+                score += 15
+        else:
+            score += 30
+        score += random.randint(0, 5)
+        scored.append((score, l))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    matched = scored[0][1]
+    await db.listener_profiles.update_one(
+        {"user_id": matched["user_id"]}, {"$set": {"last_matched_at": now()}}
+    )
+    return {"success": True, "listener": matched}
 
 # ─── EARNINGS ──────────────────────────────────────────
 @api_router.get("/earnings/dashboard")
@@ -1829,6 +2283,61 @@ async def get_me(user=Depends(get_current_user)):
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
     return u
+
+# ─── WEBSOCKET ─────────────────────────────────────────
+@app.websocket("/ws/{user_id}")
+async def user_ws_endpoint(
+    websocket: WebSocket,
+    user_id: str,
+    token: Optional[str] = Query(None),
+):
+    """
+    Persistent WebSocket for any authenticated user (listeners and seekers).
+    Connect as: ws://<host>/ws/<user_id>?token=<jwt>
+
+    Server events pushed to listeners:
+      {"event": "incoming_call", "call_id": "...", "caller_name": "...", "call_type": "voice|video"}
+
+    Server events pushed to seekers:
+      {"event": "call_accepted", "call_id": "...", "connected_at": "..."}
+      {"event": "call_rejected", "call_id": "..."}
+
+    Client keeps connection alive by sending "ping"; server replies "pong".
+    Server sends "keepalive" every 60 s of inactivity.
+    """
+    await websocket.accept()
+
+    # Token validation
+    if token:
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            if payload.get("user_id") != user_id:
+                await websocket.close(code=4003, reason="Forbidden")
+                return
+        except Exception:
+            await websocket.close(code=4001, reason="Invalid token")
+            return
+    else:
+        await websocket.close(code=4001, reason="Missing token")
+        return
+
+    _active_ws[user_id] = websocket
+    logger.info(f"WS connected: {user_id[:8]}")
+    try:
+        while True:
+            try:
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+                if msg == "ping":
+                    await websocket.send_text("pong")
+            except asyncio.TimeoutError:
+                await websocket.send_text("keepalive")
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"WS error {user_id[:8]}: {e}")
+    finally:
+        _active_ws.pop(user_id, None)
+        logger.info(f"WS disconnected: {user_id[:8]}")
 
 # Include router
 app.include_router(api_router)
