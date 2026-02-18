@@ -62,7 +62,7 @@ export default function ListenerDashboard() {
       const res = await api.post('/calls/accept', { call_id: incomingCall.call_id });
       if (res.success) {
         setIncomingCall(null);
-        // Navigate to the call screen
+        // Navigate to the call screen, passing HMS tokens so audio can connect
         router.push({
           pathname: '/call',
           params: {
@@ -72,6 +72,8 @@ export default function ListenerDashboard() {
             callType: incomingCall.call_type,
             callId: incomingCall.call_id,
             isListener: 'true',
+            hmsToken: res.hms_token || '',
+            hmsRoomId: res.hms_room_id || '',
           },
         });
       }
