@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, Animated } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -15,51 +15,109 @@ const RATINGS = [
 
 export default function RatingScreen() {
   const router = useRouter();
-  const { callId, listenerName, listenerAvatar, duration, cost } = useLocalSearchParams<{
-    callId: string; listenerName: string; listenerAvatar: string; duration: string; cost: string;
+  const { callId, listenerName, listenerAvatar, duration, cost, isListener } = useLocalSearchParams<{
+    callId: string; listenerName: string; listenerAvatar: string; duration: string; cost: string; isListener: string;
   }>();
   const [selectedRating, setSelectedRating] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [videoUnlocked, setVideoUnlocked] = useState(false);
 
+  const isListenerSide = isListener === 'true';
   const colors = AVATAR_COLORS[listenerAvatar || 'avatar_1'] || AVATAR_COLORS.avatar_1;
   const durationNum = parseInt(duration || '0');
+
+  const navigateHome = () => {
+    router.replace(isListenerSide ? '/listener/dashboard' : '/seeker/home');
+  };
 
   const submit = async () => {
     if (!selectedRating) return;
     setSubmitting(true);
     try {
-      await api.post('/ratings/submit', { call_id: callId, rating: selectedRating });
-      router.replace('/seeker/home');
+      const res = await api.post('/ratings/submit', { call_id: callId, rating: selectedRating });
+      if (res.video_unlocked) {
+        // Show video unlock celebration before navigating
+        setVideoUnlocked(true);
+        setTimeout(() => navigateHome(), 2800);
+      } else {
+        navigateHome();
+      }
     } catch (e: any) {
       Alert.alert('Error', e.message);
+      setSubmitting(false);
     }
-    setSubmitting(false);
   };
+
+  // Video unlock celebration overlay
+  if (videoUnlocked) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.unlockOverlay}>
+          <View style={styles.unlockCard}>
+            <Text style={styles.unlockEmoji}>🎥</Text>
+            <Text style={styles.unlockTitle}>Video Unlocked!</Text>
+            <Text style={styles.unlockSub}>
+              You and <Text style={{ fontWeight: '700' }}>{listenerName}</Text> both had a great conversation.{'\n'}
+              Video calls are now available between you!
+            </Text>
+            <View style={styles.unlockBadge}>
+              <Ionicons name="videocam" size={16} color="#BB8FCE" />
+              <Text style={styles.unlockBadgeText}>Video call now available</Text>
+            </View>
+          </View>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} testID="rating-screen">
       <View style={styles.content}>
         <View style={styles.header}>
           <Text style={styles.title}>Call Ended</Text>
-          <Text style={styles.subtitle}>How was your conversation?</Text>
+          <Text style={styles.subtitle}>
+            {isListenerSide ? 'How was this conversation?' : 'How was your conversation?'}
+          </Text>
         </View>
 
         <View style={styles.summaryCard}>
           <View style={[styles.avatarCircle, { backgroundColor: colors.bg }]}>
             <Text style={styles.avatarEmoji}>{colors.emoji}</Text>
           </View>
-          <Text style={styles.listenerName}>{listenerName || 'Listener'}</Text>
+          <Text style={styles.listenerName}>{listenerName || 'User'}</Text>
           <View style={styles.statsRow}>
             <View style={styles.stat}>
               <Ionicons name="time" size={16} color="#718096" />
               <Text style={styles.statText}>{Math.floor(durationNum / 60)}m {durationNum % 60}s</Text>
             </View>
-            <View style={styles.statDivider} />
-            <View style={styles.stat}>
-              <Ionicons name="wallet" size={16} color="#FF8FA3" />
-              <Text style={styles.statText}>₹{parseFloat(cost || '0').toFixed(1)}</Text>
-            </View>
+            {!isListenerSide && (
+              <>
+                <View style={styles.statDivider} />
+                <View style={styles.stat}>
+                  <Ionicons name="wallet" size={16} color="#FF8FA3" />
+                  <Text style={styles.statText}>₹{parseFloat(cost || '0').toFixed(1)}</Text>
+                </View>
+              </>
+            )}
           </View>
+
+          {/* Video unlock progress hint */}
+          {durationNum >= 300 && (
+            <View style={styles.videoUnlockHint}>
+              <Ionicons name="videocam" size={14} color="#BB8FCE" />
+              <Text style={styles.videoUnlockHintText}>
+                Rate Great or Good to unlock video calls!
+              </Text>
+            </View>
+          )}
+          {durationNum < 300 && durationNum > 0 && (
+            <View style={styles.videoLockHint}>
+              <Ionicons name="lock-closed" size={12} color="#A0AEC0" />
+              <Text style={styles.videoLockHintText}>
+                Talk 5+ min & rate highly to unlock video
+              </Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.ratingSection}>
@@ -88,7 +146,7 @@ export default function RatingScreen() {
           >
             <Text style={styles.submitText}>Submit & Continue</Text>
           </TouchableOpacity>
-          <TouchableOpacity testID="skip-rating-btn" onPress={() => router.replace('/seeker/home')}>
+          <TouchableOpacity testID="skip-rating-btn" onPress={navigateHome}>
             <Text style={styles.skipText}>Skip</Text>
           </TouchableOpacity>
         </View>
@@ -111,6 +169,10 @@ const styles = StyleSheet.create({
   stat: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   statText: { fontSize: 14, fontWeight: '600', color: '#4A5568' },
   statDivider: { width: 1, height: 20, backgroundColor: '#E2E8F0' },
+  videoUnlockHint: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, backgroundColor: '#F3E8FF', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10 },
+  videoUnlockHintText: { fontSize: 12, color: '#BB8FCE', fontWeight: '600' },
+  videoLockHint: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12 },
+  videoLockHintText: { fontSize: 11, color: '#A0AEC0', fontWeight: '500' },
   ratingSection: { alignItems: 'center' },
   ratingLabel: { fontSize: 15, fontWeight: '600', color: '#4A5568', marginBottom: 16 },
   ratingRow: { flexDirection: 'row', gap: 10 },
@@ -121,4 +183,12 @@ const styles = StyleSheet.create({
   btnDisabled: { opacity: 0.5 },
   submitText: { fontSize: 16, fontWeight: '700', color: '#fff' },
   skipText: { fontSize: 14, color: '#A0AEC0', fontWeight: '500' },
+  // Video unlock celebration
+  unlockOverlay: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 },
+  unlockCard: { backgroundColor: '#fff', borderRadius: 28, padding: 36, alignItems: 'center', shadowColor: '#BB8FCE', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.3, shadowRadius: 24, elevation: 10, width: '100%' },
+  unlockEmoji: { fontSize: 64, marginBottom: 16 },
+  unlockTitle: { fontSize: 28, fontWeight: '800', color: '#2D3748', marginBottom: 12 },
+  unlockSub: { fontSize: 15, color: '#718096', textAlign: 'center', lineHeight: 22, marginBottom: 20 },
+  unlockBadge: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#F3E8FF', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 },
+  unlockBadgeText: { fontSize: 14, fontWeight: '700', color: '#BB8FCE' },
 });

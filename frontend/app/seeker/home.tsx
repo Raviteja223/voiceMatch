@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
-  ActivityIndicator, RefreshControl, Animated, Alert, Dimensions,
+  ActivityIndicator, RefreshControl, Animated, Alert, Dimensions, Modal,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,6 +18,9 @@ export default function SeekerHome() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [matchLoading, setMatchLoading] = useState(false);
+  const [videoUnlockedIds, setVideoUnlockedIds] = useState<Set<string>>(new Set());
+  // Call type selection modal state
+  const [callTypeModal, setCallTypeModal] = useState<{ listener: Listener } | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
@@ -31,12 +34,14 @@ export default function SeekerHome() {
 
   const loadData = useCallback(async () => {
     try {
-      const [listenersRes, walletRes] = await Promise.all([
+      const [listenersRes, walletRes, videoRes] = await Promise.all([
         api.get('/listeners/online'),
         api.get('/wallet/balance'),
+        api.get('/listeners/video-unlock-status'),
       ]);
       setListeners(listenersRes.listeners || []);
       setBalance(walletRes.balance || 0);
+      setVideoUnlockedIds(new Set(videoRes.listener_ids || []));
     } catch (e) {
       console.log('Load error:', e);
     }
@@ -46,13 +51,36 @@ export default function SeekerHome() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  const checkBalance = () => {
+    if (balance < 5) {
+      Alert.alert('Low Balance', 'Please recharge to start a call', [
+        { text: 'Recharge', onPress: () => router.push('/seeker/wallet') },
+        { text: 'Cancel' },
+      ]);
+      return false;
+    }
+    return true;
+  };
+
+  const startCall = (listener: Listener, callType: 'voice' | 'video') => {
+    router.push({
+      pathname: '/call',
+      params: {
+        listenerId: listener.user_id,
+        listenerName: listener.name,
+        listenerAvatar: listener.avatar_id,
+        callType,
+      },
+    });
+  };
+
   const handleTalkNow = async () => {
-    if (balance < 5) return Alert.alert('Low Balance', 'Please recharge to start a call', [{ text: 'Recharge', onPress: () => router.push('/seeker/wallet') }, { text: 'Cancel' }]);
+    if (!checkBalance()) return;
     setMatchLoading(true);
     try {
       const res = await api.post('/match/talk-now');
       if (res.success && res.listener) {
-        router.push({ pathname: '/call', params: { listenerId: res.listener.user_id, listenerName: res.listener.name, listenerAvatar: res.listener.avatar_id, callType: 'voice' } });
+        startCall(res.listener, 'voice');
       }
     } catch (e: any) {
       Alert.alert('Matching', e.message || 'No listeners available right now');
@@ -61,13 +89,21 @@ export default function SeekerHome() {
   };
 
   const handleSelectListener = (listener: Listener) => {
-    if (balance < 5) return Alert.alert('Low Balance', 'Please recharge to start a call', [{ text: 'Recharge', onPress: () => router.push('/seeker/wallet') }, { text: 'Cancel' }]);
+    if (!checkBalance()) return;
     if (listener.in_call) return Alert.alert('Busy', 'This listener is currently in a call');
-    router.push({ pathname: '/call', params: { listenerId: listener.user_id, listenerName: listener.name, listenerAvatar: listener.avatar_id, callType: 'voice' } });
+
+    if (videoUnlockedIds.has(listener.user_id)) {
+      // Video is unlocked — let user choose call type
+      setCallTypeModal({ listener });
+    } else {
+      // Voice call only
+      startCall(listener, 'voice');
+    }
   };
 
   const renderListener = ({ item }: { item: Listener }) => {
     const colors = AVATAR_COLORS[item.avatar_id] || AVATAR_COLORS.avatar_1;
+    const hasVideo = videoUnlockedIds.has(item.user_id);
     return (
       <TouchableOpacity
         testID={`listener-card-${item.user_id}`}
@@ -85,6 +121,12 @@ export default function SeekerHome() {
             <Ionicons name="shield-checkmark" size={14} color="#A2E3C4" />
             {item.tier === 'elite' && <View style={styles.eliteBadge}><Text style={styles.eliteBadgeText}>Elite</Text></View>}
             {item.tier === 'trusted' && <View style={styles.trustedBadge}><Text style={styles.trustedBadgeText}>Trusted</Text></View>}
+            {hasVideo && (
+              <View style={styles.videoBadge}>
+                <Ionicons name="videocam" size={10} color="#BB8FCE" />
+                <Text style={styles.videoBadgeText}>Video</Text>
+              </View>
+            )}
           </View>
           <View style={styles.tagRow}>
             {item.languages?.slice(0, 2).map(l => (
@@ -103,7 +145,14 @@ export default function SeekerHome() {
             <Text style={styles.ratingText}>{item.avg_rating?.toFixed(1)}</Text>
           </View>
           <Text style={styles.callCount}>{item.total_calls} calls</Text>
-          <Ionicons name="call" size={18} color="#FF8FA3" style={{ marginTop: 6 }} />
+          {hasVideo ? (
+            <View style={styles.callVideoIcon}>
+              <Ionicons name="call" size={14} color="#FF8FA3" />
+              <Ionicons name="videocam" size={14} color="#BB8FCE" />
+            </View>
+          ) : (
+            <Ionicons name="call" size={18} color="#FF8FA3" style={{ marginTop: 6 }} />
+          )}
         </View>
       </TouchableOpacity>
     );
@@ -176,6 +225,64 @@ export default function SeekerHome() {
           </View>
         }
       />
+
+      {/* Call Type Selection Modal (shown when video is unlocked for a listener) */}
+      <Modal
+        visible={!!callTypeModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCallTypeModal(null)}
+      >
+        <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setCallTypeModal(null)}>
+          <View style={styles.callTypeSheet}>
+            <View style={styles.sheetHandle} />
+            <Text style={styles.sheetTitle}>Call {callTypeModal?.listener.name}</Text>
+            <Text style={styles.sheetSub}>You've unlocked video calls with this listener!</Text>
+
+            <TouchableOpacity
+              testID="voice-call-btn"
+              style={styles.callTypeBtn}
+              onPress={() => {
+                const l = callTypeModal!.listener;
+                setCallTypeModal(null);
+                startCall(l, 'voice');
+              }}
+            >
+              <View style={[styles.callTypeBtnIcon, { backgroundColor: '#FFF0F3' }]}>
+                <Ionicons name="call" size={24} color="#FF8FA3" />
+              </View>
+              <View style={styles.callTypeBtnInfo}>
+                <Text style={styles.callTypeBtnLabel}>Voice Call</Text>
+                <Text style={styles.callTypeBtnSub}>₹5/min · Audio only</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#A0AEC0" />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              testID="video-call-btn"
+              style={[styles.callTypeBtn, styles.callTypeBtnVideo]}
+              onPress={() => {
+                const l = callTypeModal!.listener;
+                setCallTypeModal(null);
+                startCall(l, 'video');
+              }}
+            >
+              <View style={[styles.callTypeBtnIcon, { backgroundColor: '#F3E8FF' }]}>
+                <Ionicons name="videocam" size={24} color="#BB8FCE" />
+              </View>
+              <View style={styles.callTypeBtnInfo}>
+                <Text style={[styles.callTypeBtnLabel, { color: '#BB8FCE' }]}>Video Call</Text>
+                <Text style={styles.callTypeBtnSub}>₹10/min · Face to face</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#A0AEC0" />
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.cancelSheetBtn} onPress={() => setCallTypeModal(null)}>
+              <Text style={styles.cancelSheetText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -212,12 +319,14 @@ const styles = StyleSheet.create({
   onlineDot: { position: 'absolute', bottom: 0, right: 0, width: 14, height: 14, borderRadius: 7, backgroundColor: '#48BB78', borderWidth: 2, borderColor: '#fff' },
   busyDot: { backgroundColor: '#F6E05E' },
   listenerInfo: { flex: 1, marginLeft: 12 },
-  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 5, flexWrap: 'wrap' },
   listenerName: { fontSize: 15, fontWeight: '700', color: '#2D3748' },
   eliteBadge: { backgroundColor: '#F6E05E', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 6 },
   eliteBadgeText: { fontSize: 9, fontWeight: '700', color: '#744210' },
   trustedBadge: { backgroundColor: '#D6F5E3', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 6 },
   trustedBadgeText: { fontSize: 9, fontWeight: '700', color: '#1A4D2E' },
+  videoBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#F3E8FF', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 6 },
+  videoBadgeText: { fontSize: 9, fontWeight: '700', color: '#BB8FCE' },
   tagRow: { flexDirection: 'row', gap: 4, marginTop: 4 },
   miniTag: { backgroundColor: '#EBF4FF', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
   miniTagText: { fontSize: 10, color: '#4A5568', fontWeight: '500' },
@@ -227,7 +336,22 @@ const styles = StyleSheet.create({
   ratingRow: { flexDirection: 'row', alignItems: 'center', gap: 3 },
   ratingText: { fontSize: 12, fontWeight: '700', color: '#2D3748' },
   callCount: { fontSize: 10, color: '#A0AEC0', marginTop: 2 },
+  callVideoIcon: { flexDirection: 'row', gap: 4, marginTop: 6 },
   emptyState: { alignItems: 'center', justifyContent: 'center', paddingTop: 60 },
   emptyText: { fontSize: 16, fontWeight: '600', color: '#718096', marginTop: 16 },
   emptySubText: { fontSize: 13, color: '#A0AEC0', marginTop: 4 },
+  // Call type modal
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
+  callTypeSheet: { backgroundColor: '#fff', borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 24, paddingBottom: 36, paddingTop: 12 },
+  sheetHandle: { width: 40, height: 4, backgroundColor: '#E2E8F0', borderRadius: 2, alignSelf: 'center', marginBottom: 20 },
+  sheetTitle: { fontSize: 20, fontWeight: '700', color: '#2D3748', marginBottom: 4 },
+  sheetSub: { fontSize: 13, color: '#718096', marginBottom: 20 },
+  callTypeBtn: { flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: '#FFFBF0', borderRadius: 16, padding: 16, marginBottom: 12, borderWidth: 1.5, borderColor: '#E2E8F0' },
+  callTypeBtnVideo: { borderColor: '#E9D8FD' },
+  callTypeBtnIcon: { width: 48, height: 48, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  callTypeBtnInfo: { flex: 1 },
+  callTypeBtnLabel: { fontSize: 16, fontWeight: '700', color: '#2D3748' },
+  callTypeBtnSub: { fontSize: 12, color: '#718096', marginTop: 2 },
+  cancelSheetBtn: { alignItems: 'center', paddingVertical: 12 },
+  cancelSheetText: { fontSize: 15, color: '#A0AEC0', fontWeight: '600' },
 });

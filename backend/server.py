@@ -488,8 +488,8 @@ async def get_leaderboard(period: str = "weekly", user=Depends(get_current_user)
             period_calls[listener_id] = 0
         
         duration = call.get("duration_seconds", 0)
-        # Calculate listener earnings (₹3/min voice, ₹5/min video)
-        rate = 5 if call.get("is_video") else 3
+        # Calculate listener earnings (₹2.5/min voice, ₹5/min video)
+        rate = 5 if call.get("call_type") == "video" else 2.5
         earnings = (duration / 60) * rate
         period_earnings[listener_id] += earnings
         period_minutes[listener_id] += duration / 60
@@ -633,7 +633,7 @@ async def start_call(req: CallStartRequest, user=Depends(get_current_user)):
     # Check first call discount
     prev_calls = await db.calls.count_documents({"seeker_id": user["user_id"]})
     is_first_call = prev_calls == 0
-    rate = 1 if is_first_call else (5 if req.call_type == "voice" else 8)
+    rate = 1 if is_first_call else (5 if req.call_type == "voice" else 10)
     call_id = uid()
 
     # Create 100ms room for the call
@@ -776,6 +776,14 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
     call = await db.calls.find_one({"id": req.call_id}, {"_id": 0})
     if not call:
         raise HTTPException(status_code=404, detail="Call not found")
+    # Idempotent: if call is already ended, return existing data without re-processing
+    if call["status"] in ("ended", "missed", "rejected"):
+        return {
+            "success": True,
+            "duration_seconds": call.get("duration_seconds", 0),
+            "cost": call.get("cost", 0),
+            "listener_earned": 0
+        }
     # If call was never accepted (still ringing), end it with no charge
     if call["status"] == "ringing":
         await db.calls.update_one({"id": req.call_id}, {"$set": {
@@ -814,7 +822,7 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
             else:
                 # First 5 min at ₹1/min + rest at normal rate
                 cost = 5.0  # 5 minutes at ₹1
-                normal_rate = 5 if call["call_type"] == "voice" else 8
+                normal_rate = 5 if call["call_type"] == "voice" else 10
                 cost += ((duration - 300) / 60) * normal_rate
         else:
             # Standard billing: full first minute charge + per-second after
@@ -844,7 +852,7 @@ async def end_call(req: CallEndRequest, user=Depends(get_current_user)):
             "call_id": req.call_id, "created_at": now()
         })
         # Credit listener earnings
-        listener_rate = 3 if call["call_type"] == "voice" else 5
+        listener_rate = 2.5 if call["call_type"] == "voice" else 5
         earnings = round((duration / 60) * listener_rate, 2)
         await db.listener_earnings.update_one(
             {"user_id": call["listener_id"]},
@@ -994,7 +1002,56 @@ async def submit_rating(req: RatingRequest, user=Depends(get_current_user)):
             await db.listener_profiles.update_one(
                 {"user_id": listener_id}, {"$set": {"avg_rating": round(avg, 1)}}
             )
-    return {"success": True}
+
+    # ── VIDEO UNLOCK CHECK ─────────────────────────────────────────────────────
+    # Unlock video for this seeker-listener pair when:
+    #   1. The call was a voice call of at least 5 minutes (300 seconds)
+    #   2. Both seeker AND listener give a positive rating (great or good)
+    video_unlocked = False
+    if call:
+        seeker_id = call["seeker_id"]
+        listener_id = call["listener_id"]
+        positive = {"great", "good"}
+        is_positive = req.rating in positive
+        is_voice_and_long = (
+            call.get("call_type") == "voice" and
+            call.get("duration_seconds", 0) >= 300
+        )
+
+        if is_positive and is_voice_and_long:
+            # Check if the other party has also submitted a positive rating
+            other_party_id = listener_id if user["user_id"] == seeker_id else seeker_id
+            other_rating = await db.call_ratings.find_one({
+                "call_id": req.call_id,
+                "from_user_id": other_party_id,
+                "rating": {"$in": list(positive)}
+            })
+            if other_rating:
+                # Both gave positive ratings — unlock video for this pair
+                existing = await db.video_unlock_pairs.find_one({
+                    "seeker_id": seeker_id, "listener_id": listener_id
+                })
+                if not existing:
+                    await db.video_unlock_pairs.insert_one({
+                        "id": uid(),
+                        "seeker_id": seeker_id,
+                        "listener_id": listener_id,
+                        "unlocked_at": now(),
+                        "unlocked_by_call_id": req.call_id
+                    })
+                    video_unlocked = True
+
+    return {"success": True, "video_unlocked": video_unlocked}
+
+@api_router.get("/listeners/video-unlock-status")
+async def get_video_unlock_status(user=Depends(get_current_user)):
+    """Returns listener IDs for which the current seeker has unlocked video calls."""
+    if user["role"] != "seeker":
+        return {"listener_ids": []}
+    pairs = await db.video_unlock_pairs.find(
+        {"seeker_id": user["user_id"]}, {"listener_id": 1, "_id": 0}
+    ).to_list(200)
+    return {"listener_ids": [p["listener_id"] for p in pairs]}
 
 # ─── REPORTS ───────────────────────────────────────────
 @api_router.post("/reports/submit")
