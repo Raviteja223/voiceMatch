@@ -9,6 +9,10 @@ class ApiClient {
     this.token = await AsyncStorage.getItem('auth_token');
   }
 
+  getToken(): string | null {
+    return this.token;
+  }
+
   setToken(token: string) {
     this.token = token;
     AsyncStorage.setItem('auth_token', token);

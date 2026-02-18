@@ -20,6 +20,7 @@ export default function CallScreen() {
   const [callId, setCallId] = useState('');
   const [seconds, setSeconds] = useState(0);
   const [status, setStatus] = useState<'connecting' | 'ringing' | 'active' | 'ended'>('connecting');
+  const statusRef = useRef<'connecting' | 'ringing' | 'active' | 'ended'>('connecting');
   const [cost, setCost] = useState(0);
   const [ratePerMin, setRatePerMin] = useState(5);
   const [hmsRoomId, setHmsRoomId] = useState('');
@@ -60,6 +61,7 @@ export default function CallScreen() {
   const startActiveCall = () => {
     if (dotsRef.current) clearInterval(dotsRef.current);
     if (pollRef.current) clearInterval(pollRef.current);
+    statusRef.current = 'active';
     setStatus('active');
     // Start pulse animation for active call
     Animated.loop(
@@ -102,6 +104,7 @@ export default function CallScreen() {
           setHmsConnected(true);
         }
         // Transition to ringing state - waiting for listener to accept
+        statusRef.current = 'ringing';
         setStatus('ringing');
         // Poll backend every 2 seconds to check if listener accepted
         pollRef.current = setInterval(async () => {
@@ -149,9 +152,16 @@ export default function CallScreen() {
     if (timerRef.current) clearInterval(timerRef.current);
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = null;
+    const wasConnected = statusRef.current === 'active';
+    statusRef.current = 'ended';
     setStatus('ended');
     try {
       const res = await api.post('/calls/end', { call_id: callId || callIdRef.current });
+      if (!wasConnected) {
+        // Call was cancelled before listener accepted — no rating needed
+        router.back();
+        return;
+      }
       router.replace({
         pathname: '/rating',
         params: {
@@ -171,8 +181,8 @@ export default function CallScreen() {
     return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
   };
 
-  // CONNECTING / RINGING SCREEN
-  if (status === 'connecting' || status === 'ringing') {
+  // CONNECTING / RINGING / ENDED (before navigation) SCREEN
+  if (status === 'connecting' || status === 'ringing' || status === 'ended') {
     return (
       <SafeAreaView style={[styles.connectingContainer, { backgroundColor: colors.bg }]} testID="call-connecting-screen">
         <View style={styles.connectingContent}>

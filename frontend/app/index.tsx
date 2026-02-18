@@ -1,8 +1,10 @@
-import React, { useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Animated, Dimensions, Image } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Animated, Dimensions, Image, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import api from '../src/api';
+import { getUser } from '../src/store';
 
 const { width } = Dimensions.get('window');
 
@@ -11,8 +13,31 @@ export default function WelcomeScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const [checking, setChecking] = useState(true);
 
   useEffect(() => {
+    // Check for existing session on app open
+    const checkSession = async () => {
+      await api.init();
+      const user = await getUser();
+      if (user && api.getToken()) {
+        // Restore session - navigate to appropriate home screen
+        if (!user.onboarded) {
+          router.replace(user.role === 'seeker' ? '/onboarding/seeker' : '/onboarding/listener');
+        } else {
+          router.replace(user.role === 'seeker' ? '/seeker/home' : '/listener/dashboard');
+        }
+        return;
+      }
+      // No valid session, show welcome screen
+      setChecking(false);
+      startAnimations();
+    };
+
+    checkSession();
+  }, []);
+
+  const startAnimations = () => {
     Animated.parallel([
       Animated.timing(fadeAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
       Animated.timing(slideAnim, { toValue: 0, duration: 800, useNativeDriver: true }),
@@ -24,15 +49,25 @@ export default function WelcomeScreen() {
         Animated.timing(pulseAnim, { toValue: 1, duration: 1200, useNativeDriver: true }),
       ])
     ).start();
-  }, []);
+  };
+
+  if (checking) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.loaderContainer}>
+          <ActivityIndicator size="large" color="#FF8FA3" />
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} testID="welcome-screen">
       <View style={styles.content}>
         <View style={styles.topSection}>
           <Animated.View style={[styles.logoContainer, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
-            <Image 
-              source={require('../assets/images/konnectra-logo.png')} 
+            <Image
+              source={require('../assets/images/konnectra-logo.png')}
               style={styles.logoImage}
               resizeMode="contain"
             />
@@ -82,6 +117,7 @@ export default function WelcomeScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFBF0' },
+  loaderContainer: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   content: { flex: 1, justifyContent: 'space-between', paddingHorizontal: 24 },
   topSection: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 40 },
   logoContainer: { alignItems: 'center', marginBottom: 48 },
