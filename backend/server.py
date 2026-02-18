@@ -44,6 +44,7 @@ class OTPVerify(BaseModel):
     phone: str
     otp: str
     role: Optional[str] = None  # optional - determined by gender for new users
+    device_id: Optional[str] = None  # Expo device ID for fingerprinting
 
 class SetGenderRequest(BaseModel):
     gender: str  # male or female
@@ -116,6 +117,13 @@ class KYCUploadIDRequest(BaseModel):
 
 class KYCSelfieVideoRequest(BaseModel):
     video_base64: str  # base64 encoded video or image frames
+
+class PushTokenRequest(BaseModel):
+    token: str
+    platform: str = "expo"
+
+class FavoriteToggleRequest(BaseModel):
+    listener_id: str
 
 # ─── HELPERS ───────────────────────────────────────────
 def create_token(user_id: str, role: str) -> str:
@@ -264,6 +272,110 @@ async def run_anti_collusion_checks(seeker_id: str, listener_id: str, call_id: s
         await db.users.update_one({"id": seeker_id}, {"$set": {"shadow_limited": True}})
         logger.warning(f"Shadow-limited seeker {seeker_id[:8]} with {active_flags} flags")
 
+# ─── RATE LIMITING ─────────────────────────────────────
+async def check_rate_limit_db(limit_type: str, key: str, max_calls: int, window_minutes: int) -> bool:
+    """Returns True if rate limit exceeded. MongoDB-backed for cross-process safety."""
+    window_start = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
+    count = await db.rate_limits.count_documents({
+        "type": limit_type, "key": key, "created_at": {"$gte": window_start}
+    })
+    if count >= max_calls:
+        return True
+    await db.rate_limits.insert_one({
+        "id": uid(), "type": limit_type, "key": key, "created_at": now()
+    })
+    return False
+
+# ─── DEVICE FINGERPRINTING ─────────────────────────────
+async def record_device_fingerprint(device_id: str, user_id: str):
+    """Track device↔user association; soft-flag multi-account devices."""
+    if not device_id:
+        return
+    already_this_user = await db.device_fingerprints.find_one(
+        {"device_id": device_id, "user_id": user_id}
+    )
+    if not already_this_user:
+        other_user = await db.device_fingerprints.find_one(
+            {"device_id": device_id, "user_id": {"$ne": user_id}}
+        )
+        if other_user:
+            flag_desc = f"Device shared between accounts {other_user['user_id'][:8]} and {user_id[:8]}"
+            for flag_uid in [user_id, other_user["user_id"]]:
+                existing_flag = await db.risk_flags.find_one(
+                    {"user_id": flag_uid, "flag_type": "device_shared", "status": "active"}
+                )
+                if not existing_flag:
+                    await db.risk_flags.insert_one({
+                        "id": uid(), "user_id": flag_uid, "flag_type": "device_shared",
+                        "description": flag_desc, "status": "active", "created_at": now()
+                    })
+            logger.warning(f"Multi-account device: device={device_id[:12]}, users={other_user['user_id'][:8]},{user_id[:8]}")
+        await db.device_fingerprints.update_one(
+            {"device_id": device_id, "user_id": user_id},
+            {"$set": {"device_id": device_id, "user_id": user_id, "updated_at": now()},
+             "$setOnInsert": {"created_at": now()}},
+            upsert=True
+        )
+
+async def is_same_device(user_a: str, user_b: str) -> bool:
+    """Return True if two users share a known device fingerprint."""
+    a_devices = await db.device_fingerprints.find(
+        {"user_id": user_a}, {"device_id": 1, "_id": 0}
+    ).to_list(20)
+    a_ids = {d["device_id"] for d in a_devices}
+    if not a_ids:
+        return False
+    match = await db.device_fingerprints.find_one(
+        {"user_id": user_b, "device_id": {"$in": list(a_ids)}}
+    )
+    return match is not None
+
+# ─── PUSH NOTIFICATIONS ─────────────────────────────────
+async def send_expo_push(push_token: str, title: str, body: str, data: dict = {}):
+    """Send a push notification via Expo Push API."""
+    if not push_token or not push_token.startswith("ExponentPushToken"):
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            await http_client.post(
+                "https://exp.host/--/api/v2/push/send",
+                json={"to": push_token, "sound": "default",
+                      "title": title, "body": body, "data": data},
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+            )
+    except Exception as e:
+        logger.warning(f"Push notification error: {e}")
+
+async def notify_favorites_of_listener_online(listener_id: str, listener_name: str):
+    """Notify seekers who favorited this listener that they're now online."""
+    favorites = await db.favorites.find(
+        {"listener_id": listener_id}, {"seeker_id": 1, "_id": 0}
+    ).to_list(200)
+    if not favorites:
+        return
+    one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    for fav in favorites:
+        seeker_id = fav["seeker_id"]
+        # Throttle: one notification per seeker-listener pair per hour
+        recent = await db.push_notifications_sent.find_one({
+            "seeker_id": seeker_id, "listener_id": listener_id,
+            "sent_at": {"$gte": one_hour_ago}
+        })
+        if recent:
+            continue
+        token_doc = await db.push_tokens.find_one({"user_id": seeker_id}, {"token": 1})
+        if not token_doc:
+            continue
+        await send_expo_push(
+            token_doc["token"],
+            title=f"{listener_name} is available!",
+            body="Your favorite listener is online now. Tap to start a call.",
+            data={"listener_id": listener_id, "screen": "seeker/home"},
+        )
+        await db.push_notifications_sent.insert_one({
+            "seeker_id": seeker_id, "listener_id": listener_id, "sent_at": now()
+        })
+
 # ─── CALL RECORDING METADATA ──────────────────────────
 async def create_call_recording_metadata(call_id: str, seeker_id: str, listener_id: str, hms_room_id: str):
     """Store encrypted call recording metadata (actual recording via 100ms)"""
@@ -288,6 +400,9 @@ async def cleanup_expired_recordings():
 # ─── AUTH ──────────────────────────────────────────────
 @api_router.post("/auth/send-otp")
 async def send_otp(req: OTPRequest):
+    # Rate limit: 3 OTP sends per phone per 10 minutes
+    if await check_rate_limit_db("otp_send", req.phone, 3, 10):
+        raise HTTPException(status_code=429, detail="Too many OTP requests. Please wait 10 minutes before retrying.")
     # Mocked OTP - always sends 1234
     return {"success": True, "message": "OTP sent (mocked: use 1234)"}
 
@@ -300,6 +415,8 @@ async def verify_otp(req: OTPVerify):
     user = await db.users.find_one({"phone": req.phone}, {"_id": 0})
     if user:
         # Existing user - return with their role
+        if req.device_id:
+            await record_device_fingerprint(req.device_id, user["id"])
         token = create_token(user["id"], user.get("role", ""))
         return {"success": True, "token": token, "user": user, "needs_gender": False}
     else:
@@ -315,6 +432,8 @@ async def verify_otp(req: OTPVerify):
         }
         await db.users.insert_one(user)
         user.pop("_id", None)
+        if req.device_id:
+            await record_device_fingerprint(req.device_id, user_id)
         token = create_token(user_id, "")
         return {"success": True, "token": token, "user": user, "needs_gender": True}
 
@@ -426,10 +545,23 @@ async def toggle_online(req: ToggleOnlineRequest, user=Depends(get_current_user)
 async def listener_heartbeat(user=Depends(get_current_user)):
     if user["role"] != "listener":
         raise HTTPException(status_code=403, detail="Listeners only")
+    profile = await db.listener_profiles.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    # Detect coming-online event: was offline or last heartbeat > 2 minutes ago
+    was_offline = True
+    if profile and profile.get("is_online") and profile.get("last_online"):
+        try:
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(profile["last_online"])).total_seconds()
+            was_offline = elapsed > 120
+        except Exception:
+            pass
     await db.listener_profiles.update_one(
         {"user_id": user["user_id"]},
         {"$set": {"is_online": True, "last_online": now()}}
     )
+    # Notify favoriting seekers only on fresh online event
+    if was_offline:
+        listener_name = profile.get("name", "Your listener") if profile else "Your listener"
+        await notify_favorites_of_listener_online(user["user_id"], listener_name)
     return {"success": True, "online": True}
 
 # Go offline when listener leaves the app
@@ -951,6 +1083,9 @@ async def get_balance(user=Depends(get_current_user)):
 
 @api_router.post("/wallet/recharge")
 async def recharge(req: RechargeRequest, user=Depends(get_current_user)):
+    # Rate limit: 10 recharges per user per 24 hours
+    if await check_rate_limit_db("recharge", user["user_id"], 10, 1440):
+        raise HTTPException(status_code=429, detail="Too many recharge attempts today. Please try again tomorrow.")
     packs = {"pack_99": 99, "pack_299": 299, "pack_699": 699}
     amount = packs.get(req.pack_id)
     if not amount:
@@ -966,6 +1101,8 @@ async def recharge(req: RechargeRequest, user=Depends(get_current_user)):
         "type": "credit", "amount": amount,
         "description": f"Recharge ₹{amount}", "created_at": now()
     })
+    # Trigger seeker referral credit on first recharge (anti-abuse: bonus only after real payment)
+    await process_seeker_referral_on_recharge(user["user_id"])
     wallet = await db.wallet_accounts.find_one({"user_id": user["user_id"]}, {"_id": 0})
     return {"success": True, "new_balance": wallet.get("balance", 0)}
 
@@ -975,6 +1112,49 @@ async def get_transactions(user=Depends(get_current_user)):
         {"user_id": user["user_id"]}, {"_id": 0}
     ).sort("created_at", -1).to_list(100)
     return {"transactions": txns}
+
+# ─── PUSH TOKENS ────────────────────────────────────────
+@api_router.post("/push/register-token")
+async def register_push_token(req: PushTokenRequest, user=Depends(get_current_user)):
+    """Register an Expo push token for the authenticated user."""
+    await db.push_tokens.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"user_id": user["user_id"], "token": req.token,
+                  "platform": req.platform, "updated_at": now()},
+         "$setOnInsert": {"created_at": now()}},
+        upsert=True
+    )
+    return {"success": True}
+
+# ─── FAVORITES ───────────────────────────────────────────
+@api_router.post("/favorites/toggle")
+async def toggle_favorite(req: FavoriteToggleRequest, user=Depends(get_current_user)):
+    """Toggle a listener as a favorite. Returns new favorited state."""
+    if user["role"] != "seeker":
+        raise HTTPException(status_code=403, detail="Seekers only")
+    existing = await db.favorites.find_one(
+        {"seeker_id": user["user_id"], "listener_id": req.listener_id}
+    )
+    if existing:
+        await db.favorites.delete_one(
+            {"seeker_id": user["user_id"], "listener_id": req.listener_id}
+        )
+        return {"success": True, "favorited": False}
+    await db.favorites.insert_one({
+        "id": uid(), "seeker_id": user["user_id"],
+        "listener_id": req.listener_id, "created_at": now()
+    })
+    return {"success": True, "favorited": True}
+
+@api_router.get("/favorites")
+async def get_favorites(user=Depends(get_current_user)):
+    """Get the current seeker's favorited listener IDs."""
+    if user["role"] != "seeker":
+        return {"listener_ids": []}
+    favs = await db.favorites.find(
+        {"seeker_id": user["user_id"]}, {"listener_id": 1, "_id": 0}
+    ).to_list(200)
+    return {"listener_ids": [f["listener_id"] for f in favs]}
 
 # ─── RATINGS ───────────────────────────────────────────
 @api_router.post("/ratings/submit")
@@ -1077,6 +1257,35 @@ async def submit_report(req: ReportRequest, user=Depends(get_current_user)):
         "created_at": now()
     })
     return {"success": True, "message": "Report submitted"}
+
+async def process_seeker_referral_on_recharge(referred_user_id: str):
+    """Credit referrer ₹15 when the referred seeker completes their first recharge."""
+    referral = await db.seeker_referrals.find_one(
+        {"referred_id": referred_user_id, "status": "pending"}
+    )
+    if not referral:
+        return
+    # Count prior recharges (the current one is already in the ledger)
+    prior_count = await db.wallet_ledger.count_documents({
+        "user_id": referred_user_id, "type": "credit",
+        "description": {"$regex": "^Recharge"}
+    })
+    if prior_count > 1:
+        return  # Not the first recharge
+    await db.wallet_accounts.update_one(
+        {"user_id": referral["referrer_id"]}, {"$inc": {"balance": 15}}
+    )
+    await db.wallet_ledger.insert_one({
+        "id": uid(), "user_id": referral["referrer_id"],
+        "type": "credit", "amount": 15,
+        "description": "Referral bonus - friend recharged for first time",
+        "created_at": now()
+    })
+    await db.seeker_referrals.update_one(
+        {"id": referral["id"]},
+        {"$set": {"status": "credited", "credited_at": now()}}
+    )
+    logger.info(f"Seeker referral credited: referrer={referral['referrer_id'][:8]}")
 
 # ─── REFERRAL HELPERS ──────────────────────────────────
 # Referral only activates when referred listener completes 30 minutes of calls!
@@ -1212,6 +1421,9 @@ async def get_my_referral_code(user=Depends(get_current_user)):
 async def apply_referral_code(req: ApplyReferralRequest, user=Depends(get_current_user)):
     if user["role"] != "listener":
         raise HTTPException(status_code=403, detail="Listeners only")
+    # Rate limit: 3 apply attempts per user per day
+    if await check_rate_limit_db("listener_referral_apply", user["user_id"], 3, 1440):
+        raise HTTPException(status_code=429, detail="Too many referral code attempts. Try again tomorrow.")
     # Check if already used a referral code
     existing = await db.referrals.find_one({"referred_id": user["user_id"]})
     if existing:
@@ -1222,6 +1434,9 @@ async def apply_referral_code(req: ApplyReferralRequest, user=Depends(get_curren
         raise HTTPException(status_code=404, detail="Invalid referral code")
     if ref_code["user_id"] == user["user_id"]:
         raise HTTPException(status_code=400, detail="Cannot use your own referral code")
+    # Device abuse check: reject if referred and referrer share a device
+    if await is_same_device(user["user_id"], ref_code["user_id"]):
+        raise HTTPException(status_code=400, detail="Referral not allowed from the same device")
     # Check if referrer has hit max referrals (25)
     referrer_total = await db.referrals.count_documents({"referrer_id": ref_code["user_id"]})
     if referrer_total >= MAX_TOTAL_REFERRALS:
@@ -1260,16 +1475,19 @@ async def get_my_referrals(user=Depends(get_current_user)):
 
 # Check and activate pending referrals (called after each call ends)
 async def check_referral_activation(listener_id: str):
-    """Check if referred listener has hit 30 min talk time to activate referral"""
+    """Check if referred listener has hit 30 min talk time (verified from call records) to activate referral."""
     referral = await db.referrals.find_one(
         {"referred_id": listener_id, "status": "pending"}, {"_id": 0}
     )
     if not referral:
         return
-    profile = await db.listener_profiles.find_one({"user_id": listener_id}, {"_id": 0})
-    if not profile:
-        return
-    if profile.get("total_minutes", 0) >= REFERRAL_ACTIVATION_MINUTES:
+    # Compute actual minutes from immutable call records (not the mutable profile stat)
+    ended_calls = await db.calls.find(
+        {"listener_id": listener_id, "status": "ended", "duration_seconds": {"$gt": 0}},
+        {"duration_seconds": 1, "_id": 0}
+    ).to_list(2000)
+    actual_minutes = sum(c.get("duration_seconds", 0) for c in ended_calls) / 60
+    if actual_minutes >= REFERRAL_ACTIVATION_MINUTES:
         # Activate referral!
         active_count = await db.referrals.count_documents({"referrer_id": referral["referrer_id"], "status": "active"})
         tier_name, tier = get_referral_tier(active_count)
@@ -1673,6 +1891,9 @@ async def get_seeker_referral_code(user=Depends(get_current_user)):
 async def apply_seeker_referral(req: SeekerApplyReferralRequest, user=Depends(get_current_user)):
     if user["role"] != "seeker":
         raise HTTPException(status_code=403, detail="Seekers only")
+    # Rate limit: 3 attempts per user per day
+    if await check_rate_limit_db("seeker_referral_apply", user["user_id"], 3, 1440):
+        raise HTTPException(status_code=429, detail="Too many referral code attempts. Try again tomorrow.")
     existing = await db.seeker_referrals.find_one({"referred_id": user["user_id"]})
     if existing:
         raise HTTPException(status_code=400, detail="You already used a referral code")
@@ -1681,22 +1902,19 @@ async def apply_seeker_referral(req: SeekerApplyReferralRequest, user=Depends(ge
         raise HTTPException(status_code=404, detail="Invalid referral code")
     if ref_code["user_id"] == user["user_id"]:
         raise HTTPException(status_code=400, detail="Cannot use your own code")
-    # Credit ₹15 to the referrer immediately
-    await db.wallet_accounts.update_one(
-        {"user_id": ref_code["user_id"]},
-        {"$inc": {"balance": 15}}
-    )
-    await db.wallet_ledger.insert_one({
-        "id": uid(), "user_id": ref_code["user_id"],
-        "type": "credit", "amount": 15,
-        "description": "Referral bonus - friend joined", "created_at": now()
-    })
+    # Device abuse check: same device as referrer = reject
+    if await is_same_device(user["user_id"], ref_code["user_id"]):
+        raise HTTPException(status_code=400, detail="Referral not allowed from the same device")
+    # Anti-abuse: do NOT credit immediately. Credit fires on referred user's first recharge.
     await db.seeker_referrals.insert_one({
         "id": uid(), "referrer_id": ref_code["user_id"],
         "referred_id": user["user_id"], "code_used": req.referral_code.upper(),
-        "status": "credited", "created_at": now()
+        "status": "pending", "created_at": now()
     })
-    return {"success": True, "message": "Referral applied! Your friend earned ₹15 credits."}
+    return {
+        "success": True,
+        "message": "Referral code applied! Your friend will earn ₹15 credits when you complete your first recharge."
+    }
 
 # ─── CALL RECORDINGS ──────────────────────────────────
 @api_router.get("/recordings/list")

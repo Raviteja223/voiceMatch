@@ -15,8 +15,9 @@ const RATINGS = [
 
 export default function RatingScreen() {
   const router = useRouter();
-  const { callId, listenerName, listenerAvatar, duration, cost, isListener } = useLocalSearchParams<{
-    callId: string; listenerName: string; listenerAvatar: string; duration: string; cost: string; isListener: string;
+  const { callId, listenerId, listenerName, listenerAvatar, duration, cost, isListener } = useLocalSearchParams<{
+    callId: string; listenerId: string; listenerName: string; listenerAvatar: string;
+    duration: string; cost: string; isListener: string;
   }>();
   const [selectedRating, setSelectedRating] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -28,6 +29,19 @@ export default function RatingScreen() {
 
   const navigateHome = () => {
     router.replace(isListenerSide ? '/listener/dashboard' : '/seeker/home');
+  };
+
+  const rebookListener = () => {
+    if (!listenerId) { navigateHome(); return; }
+    router.replace({
+      pathname: '/call',
+      params: {
+        listenerId,
+        listenerName,
+        listenerAvatar: listenerAvatar || 'avatar_1',
+        callType: 'voice',
+      },
+    });
   };
 
   const submit = async () => {
@@ -146,6 +160,12 @@ export default function RatingScreen() {
           >
             <Text style={styles.submitText}>Submit & Continue</Text>
           </TouchableOpacity>
+          {!isListenerSide && listenerId ? (
+            <TouchableOpacity testID="rebook-btn" style={styles.rebookBtn} onPress={rebookListener}>
+              <Ionicons name="refresh-circle" size={18} color="#FF8FA3" />
+              <Text style={styles.rebookText}>Rebook {listenerName || 'this listener'}</Text>
+            </TouchableOpacity>
+          ) : null}
           <TouchableOpacity testID="skip-rating-btn" onPress={navigateHome}>
             <Text style={styles.skipText}>Skip</Text>
           </TouchableOpacity>
@@ -182,6 +202,8 @@ const styles = StyleSheet.create({
   submitBtn: { backgroundColor: '#FF8FA3', paddingVertical: 16, borderRadius: 28, alignItems: 'center', width: '100%' },
   btnDisabled: { opacity: 0.5 },
   submitText: { fontSize: 16, fontWeight: '700', color: '#fff' },
+  rebookBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#FFF0F3', paddingVertical: 12, paddingHorizontal: 24, borderRadius: 28, borderWidth: 1.5, borderColor: '#FFDDE6' },
+  rebookText: { fontSize: 14, fontWeight: '700', color: '#FF8FA3' },
   skipText: { fontSize: 14, color: '#A0AEC0', fontWeight: '500' },
   // Video unlock celebration
   unlockOverlay: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 },

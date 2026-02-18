@@ -1,13 +1,22 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
-  ActivityIndicator, RefreshControl, Animated, Alert, Dimensions, Modal,
+  ActivityIndicator, RefreshControl, Animated, Alert, Dimensions, Modal, Platform,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import * as Notifications from 'expo-notifications';
 import api from '../../src/api';
 import { AVATAR_COLORS, Listener } from '../../src/store';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 const { width } = Dimensions.get('window');
 
@@ -19,9 +28,44 @@ export default function SeekerHome() {
   const [refreshing, setRefreshing] = useState(false);
   const [matchLoading, setMatchLoading] = useState(false);
   const [videoUnlockedIds, setVideoUnlockedIds] = useState<Set<string>>(new Set());
+  const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   // Call type selection modal state
   const [callTypeModal, setCallTypeModal] = useState<{ listener: Listener } | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  // Register for push notifications and send token to backend
+  useEffect(() => {
+    (async () => {
+      try {
+        const { status: existing } = await Notifications.getPermissionsAsync();
+        let finalStatus = existing;
+        if (existing !== 'granted') {
+          const { status } = await Notifications.requestPermissionsAsync();
+          finalStatus = status;
+        }
+        if (finalStatus !== 'granted') return;
+        const tokenData = await Notifications.getExpoPushTokenAsync();
+        await api.post('/push/register-token', {
+          token: tokenData.data,
+          platform: Platform.OS,
+        });
+      } catch (_) {
+        // Push registration is best-effort; don't crash the app
+      }
+    })();
+  }, []);
+
+  // Navigate to a listener when tapped from a notification
+  useEffect(() => {
+    const sub = Notifications.addNotificationResponseReceivedListener(response => {
+      const data = response.notification.request.content.data as any;
+      if (data?.screen === 'seeker/home') {
+        // Home screen is already open; a refresh will surface the listener
+        loadData();
+      }
+    });
+    return () => sub.remove();
+  }, []);
 
   useEffect(() => {
     Animated.loop(
@@ -34,20 +78,33 @@ export default function SeekerHome() {
 
   const loadData = useCallback(async () => {
     try {
-      const [listenersRes, walletRes, videoRes] = await Promise.all([
+      const [listenersRes, walletRes, videoRes, favRes] = await Promise.all([
         api.get('/listeners/online'),
         api.get('/wallet/balance'),
         api.get('/listeners/video-unlock-status'),
+        api.get('/favorites'),
       ]);
       setListeners(listenersRes.listeners || []);
       setBalance(walletRes.balance || 0);
       setVideoUnlockedIds(new Set(videoRes.listener_ids || []));
+      setFavoriteIds(new Set(favRes.listener_ids || []));
     } catch (e) {
       console.log('Load error:', e);
     }
     setLoading(false);
     setRefreshing(false);
   }, []);
+
+  const toggleFavorite = async (listenerId: string) => {
+    try {
+      const res = await api.post('/favorites/toggle', { listener_id: listenerId });
+      setFavoriteIds(prev => {
+        const next = new Set(prev);
+        if (res.favorited) next.add(listenerId); else next.delete(listenerId);
+        return next;
+      });
+    } catch (_) {}
+  };
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -104,10 +161,11 @@ export default function SeekerHome() {
   const renderListener = ({ item }: { item: Listener }) => {
     const colors = AVATAR_COLORS[item.avatar_id] || AVATAR_COLORS.avatar_1;
     const hasVideo = videoUnlockedIds.has(item.user_id);
+    const isFavorite = favoriteIds.has(item.user_id);
     return (
       <TouchableOpacity
         testID={`listener-card-${item.user_id}`}
-        style={styles.listenerCard}
+        style={[styles.listenerCard, isFavorite && styles.favoriteCard]}
         onPress={() => handleSelectListener(item)}
         activeOpacity={0.85}
       >
@@ -140,7 +198,18 @@ export default function SeekerHome() {
           </View>
         </View>
         <View style={styles.ratingCol}>
-          <View style={styles.ratingRow}>
+          <TouchableOpacity
+            testID={`favorite-btn-${item.user_id}`}
+            onPress={() => toggleFavorite(item.user_id)}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons
+              name={isFavorite ? 'heart' : 'heart-outline'}
+              size={20}
+              color={isFavorite ? '#FF8FA3' : '#CBD5E0'}
+            />
+          </TouchableOpacity>
+          <View style={[styles.ratingRow, { marginTop: 4 }]}>
             <Ionicons name="star" size={12} color="#F6E05E" />
             <Text style={styles.ratingText}>{item.avg_rating?.toFixed(1)}</Text>
           </View>
@@ -151,12 +220,19 @@ export default function SeekerHome() {
               <Ionicons name="videocam" size={14} color="#BB8FCE" />
             </View>
           ) : (
-            <Ionicons name="call" size={18} color="#FF8FA3" style={{ marginTop: 6 }} />
+            <Ionicons name="call" size={18} color="#FF8FA3" style={{ marginTop: 4 }} />
           )}
         </View>
       </TouchableOpacity>
     );
   };
+
+  // Sort: favorites first, then by name
+  const sortedListeners = [...listeners].sort((a, b) => {
+    const aFav = favoriteIds.has(a.user_id) ? 0 : 1;
+    const bFav = favoriteIds.has(b.user_id) ? 0 : 1;
+    return aFav - bFav;
+  });
 
   if (loading) {
     return (
@@ -212,7 +288,7 @@ export default function SeekerHome() {
 
       <FlatList
         testID="listeners-list"
-        data={listeners}
+        data={sortedListeners}
         renderItem={renderListener}
         keyExtractor={item => item.user_id}
         contentContainerStyle={styles.listContent}
@@ -313,6 +389,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', padding: 14, backgroundColor: '#fff',
     borderRadius: 18, marginBottom: 10,
     shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 2,
+  },
+  favoriteCard: {
+    borderWidth: 1.5, borderColor: '#FFDDE6',
   },
   avatarCircle: { width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center' },
   avatarEmoji: { fontSize: 26 },
