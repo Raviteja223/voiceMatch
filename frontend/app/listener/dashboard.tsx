@@ -91,18 +91,11 @@ export default function ListenerDashboard() {
 
   useEffect(() => {
     loadData();
-    // Send heartbeat every 30 seconds to stay online
-    const heartbeatInterval = setInterval(() => {
-      api.post('/listeners/heartbeat').catch(() => {});
-    }, 30000);
     // Poll for incoming calls every 3 seconds
     checkIncomingCall();
     incomingPollRef.current = setInterval(checkIncomingCall, 3000);
     return () => {
-      clearInterval(heartbeatInterval);
       if (incomingPollRef.current) clearInterval(incomingPollRef.current);
-      // Go offline when leaving dashboard
-      api.post('/listeners/go-offline').catch(() => {});
     };
   }, [loadData, checkIncomingCall]);
 

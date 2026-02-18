@@ -548,8 +548,10 @@ async def get_leaderboard(period: str = "weekly", user=Depends(get_current_user)
 
 @api_router.get("/listeners/online")
 async def get_online_listeners(user=Depends(get_current_user)):
+    # Only show listeners who sent a heartbeat in the last 90 seconds
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=90)).isoformat()
     listeners = await db.listener_profiles.find(
-        {"is_online": True}, {"_id": 0}
+        {"is_online": True, "last_online": {"$gte": cutoff}}, {"_id": 0}
     ).to_list(50)
     return {"listeners": listeners}
 
@@ -573,8 +575,10 @@ async def talk_now(user=Depends(get_current_user)):
     seeker_user = await db.users.find_one({"id": user["user_id"]}, {"_id": 0})
     if seeker_user and seeker_user.get("shadow_limited"):
         raise HTTPException(status_code=404, detail="No listeners available right now. Try again shortly.")
+    # Only match listeners who sent a heartbeat in the last 90 seconds
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=90)).isoformat()
     online = await db.listener_profiles.find(
-        {"is_online": True, "in_call": {"$ne": True}}, {"_id": 0}
+        {"is_online": True, "in_call": {"$ne": True}, "last_online": {"$gte": cutoff}}, {"_id": 0}
     ).to_list(50)
     if not online:
         raise HTTPException(status_code=404, detail="No listeners available right now. Try again shortly.")
@@ -1726,6 +1730,7 @@ async def seed_data():
             "style_tags": s_tags, "topic_tags": t_tags,
             "boundary_answers": [1, 1, 0, 1, 0],
             "is_online": random.choice([True, True, True, False]),
+            "last_online": now(),
             "in_call": False, "tier": random.choice(["new", "trusted", "trusted", "elite"]),
             "total_calls": random.randint(10, 200),
             "total_minutes": random.randint(100, 3000),
@@ -1819,6 +1824,7 @@ async def startup():
                 "style_tags": stags, "topic_tags": ttags,
                 "boundary_answers": [1, 1, 0, 1, 0],
                 "is_online": random.choice([True, True, True, False]),
+                "last_online": now(),
                 "in_call": False, "tier": random.choice(["new", "trusted", "trusted", "elite"]),
                 "total_calls": random.randint(10, 200),
                 "total_minutes": random.randint(100, 3000),
