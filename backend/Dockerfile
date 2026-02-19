@@ -19,7 +19,7 @@ ENV HMS_APP_SECRET=BNVzVYKcn2AJkNBYu1yyrshHpBlJoRzxkY2cH6XBgkPEbXQho2SWZLipCU4e4
 ENV FIREBASE_SERVICE_ACCOUNT_KEY=/app/voicematch-7640d-firebase-adminsdk-fbsvc-7cad195cea.json
 
 # Gemini API key for KYC document OCR, liveness, and face matching
-ENV GEMINI_API_KEY=your-gemini-api-key-here
+ENV GEMINI_API_KEY=AIzaSyDPQ3Y74A_f4xyK9fpLm7bxor-kBUJiJRc
 
 # Copy your backend code
 COPY . /app
