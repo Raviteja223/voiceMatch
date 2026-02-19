@@ -15,6 +15,8 @@ import httpx
 from datetime import datetime, timezone, timedelta
 import asyncio
 import json
+import firebase_admin
+from firebase_admin import credentials as fb_credentials, auth as fb_auth
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -22,6 +24,21 @@ load_dotenv(ROOT_DIR / '.env')
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
+
+# ─── FIREBASE ADMIN INIT ─────────────────────────────
+_firebase_cred_path = os.environ.get('FIREBASE_SERVICE_ACCOUNT_KEY', '')
+if _firebase_cred_path and os.path.exists(_firebase_cred_path):
+    _fb_cred = fb_credentials.Certificate(_firebase_cred_path)
+    firebase_admin.initialize_app(_fb_cred)
+elif os.environ.get('FIREBASE_PROJECT_ID'):
+    # Initialize without credentials (uses Application Default Credentials)
+    firebase_admin.initialize_app(options={'projectId': os.environ['FIREBASE_PROJECT_ID']})
+else:
+    # Fallback: init with no project — firebase-verify will return 503
+    try:
+        firebase_admin.initialize_app()
+    except Exception:
+        pass
 
 JWT_SECRET = "konnectra-secret-key-2024"
 JWT_ALGORITHM = "HS256"
@@ -119,6 +136,11 @@ class KYCUploadIDRequest(BaseModel):
 
 class KYCSelfieVideoRequest(BaseModel):
     video_base64: str  # base64 encoded video or image frames
+
+class FirebaseAuthRequest(BaseModel):
+    firebase_token: str
+    phone: str
+    device_id: Optional[str] = None
 
 class PushTokenRequest(BaseModel):
     token: str
@@ -482,6 +504,52 @@ async def verify_otp(req: OTPVerify):
             "role": "",
             "gender": "",
             "onboarded": False,
+            "created_at": now()
+        }
+        await db.users.insert_one(user)
+        user.pop("_id", None)
+        if req.device_id:
+            await record_device_fingerprint(req.device_id, user_id)
+        token = create_token(user_id, "")
+        return {"success": True, "token": token, "user": user, "needs_gender": True}
+
+@api_router.post("/auth/firebase-verify")
+async def firebase_verify(req: FirebaseAuthRequest):
+    """Verify a Firebase ID token from phone OTP auth and return an app JWT."""
+    try:
+        decoded = fb_auth.verify_id_token(req.firebase_token)
+    except Exception as e:
+        logger.warning(f"Firebase token verification failed: {e}")
+        raise HTTPException(status_code=401, detail="Invalid or expired Firebase token")
+
+    # Extract the phone number verified by Firebase
+    firebase_phone = decoded.get("phone_number", "")
+    if not firebase_phone:
+        raise HTTPException(status_code=400, detail="Firebase token does not contain a phone number")
+
+    # Use the Firebase-verified phone; fall back to the client-supplied one only
+    # if they match (prevents spoofing).
+    phone = firebase_phone
+    if req.phone and req.phone != firebase_phone:
+        raise HTTPException(status_code=400, detail="Phone number mismatch")
+
+    # Check if user already exists by phone number
+    user = await db.users.find_one({"phone": phone}, {"_id": 0})
+    if user:
+        if req.device_id:
+            await record_device_fingerprint(req.device_id, user["id"])
+        token = create_token(user["id"], user.get("role", ""))
+        return {"success": True, "token": token, "user": user, "needs_gender": False}
+    else:
+        # New user
+        user_id = uid()
+        user = {
+            "id": user_id,
+            "phone": phone,
+            "role": "",
+            "gender": "",
+            "onboarded": False,
+            "firebase_uid": decoded.get("uid", ""),
             "created_at": now()
         }
         await db.users.insert_one(user)
