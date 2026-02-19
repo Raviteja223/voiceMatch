@@ -156,7 +156,7 @@ export default function KYCScreen() {
       if (res.success) {
         setExtractedData(res.extracted_data);
         setAgeVerification(res.age_verification);
-        
+
         if (!res.age_verification?.is_18_plus) {
           Alert.alert('Age Verification Failed', 'You must be 18+ to use this platform');
           setStep('result');
@@ -164,6 +164,10 @@ export default function KYCScreen() {
         } else {
           setStep('confirm_data');
         }
+      } else {
+        // Document rejected (not a valid ID, unreadable, etc.)
+        Alert.alert('Document Error', res.message || 'Please upload a valid ID document.');
+        setIdImage(null);
       }
     } catch (e: any) {
       Alert.alert('Error', e.message);
@@ -192,10 +196,10 @@ export default function KYCScreen() {
     
     try {
       const res = await api.post('/kyc/upload-selfie', {
-        video_base64: selfieImage, // Using image for simplicity
+        video_base64: selfieImage,
       });
-      
-      // Wait for animation
+
+      // Wait for animation then show result
       setTimeout(() => {
         setFinalResult(res.final_result);
         setStep('result');

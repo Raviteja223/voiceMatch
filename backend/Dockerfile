@@ -18,6 +18,9 @@ ENV HMS_APP_SECRET=BNVzVYKcn2AJkNBYu1yyrshHpBlJoRzxkY2cH6XBgkPEbXQho2SWZLipCU4e4
 # Firebase Admin SDK — place your service account JSON in backend/ as firebase-service-account.json
 ENV FIREBASE_SERVICE_ACCOUNT_KEY=/app/voicematch-7640d-firebase-adminsdk-fbsvc-7cad195cea.json
 
+# Gemini API key for KYC document OCR, liveness, and face matching
+ENV GEMINI_API_KEY=your-gemini-api-key-here
+
 # Copy your backend code
 COPY . /app
 

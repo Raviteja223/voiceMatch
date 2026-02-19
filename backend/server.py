@@ -1881,47 +1881,99 @@ async def check_referral_activation(listener_id: str):
 
 # ─── KYC VERIFICATION ─────────────────────────────────
 # ─── ADVANCED KYC SYSTEM ───────────────────────────────
-# Zero-cost KYC with simulated OCR, face detection, and liveness checks
-# Can be upgraded to real APIs (AWS Rekognition, Google Vision) later
+# Real KYC using Gemini Vision for OCR, document validation,
+# face liveness detection, and face matching.
 
 import base64
 import re
 from datetime import date
+import google.generativeai as genai
 
-def simulate_ocr_extraction(id_type: str, image_data: str) -> dict:
+_GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if _GEMINI_API_KEY:
+    genai.configure(api_key=_GEMINI_API_KEY)
+_gemini_model = genai.GenerativeModel("gemini-1.5-flash") if _GEMINI_API_KEY else None
+
+
+def _image_part(base64_data: str, mime: str = "image/jpeg") -> dict:
+    """Build an inline image part for the Gemini API."""
+    return {"inline_data": {"mime_type": mime, "data": base64_data}}
+
+
+async def gemini_ocr_extraction(id_type: str, image_data: str) -> dict:
     """
-    Simulates OCR extraction from ID document.
-    In production, replace with Google Vision API or AWS Textract.
-    Returns extracted name, DOB, and confidence score.
+    Use Gemini Vision to extract name & DOB from an ID document image.
+    Also validates that the image is actually a legitimate ID document.
     """
-    # Simulate processing delay would happen in real OCR
-    # For demo, generate realistic extracted data based on image size
-    image_size = len(image_data)
-    
-    # Simulate different confidence levels based on image quality (size as proxy)
-    if image_size > 50000:  # Good quality image
-        confidence = random.uniform(0.85, 0.98)
-    elif image_size > 20000:  # Medium quality
-        confidence = random.uniform(0.70, 0.85)
-    else:  # Low quality
-        confidence = random.uniform(0.50, 0.70)
-    
-    # Simulated extracted data (in production, this comes from OCR)
-    sample_names = ["Priya Sharma", "Ananya Gupta", "Riya Patel", "Meera Singh", "Kavya Reddy"]
-    sample_dobs = ["1998-05-15", "1999-08-22", "2000-01-10", "1997-12-03", "2001-06-28"]
-    
-    idx = image_size % len(sample_names)
-    
+    if not _gemini_model:
+        raise HTTPException(status_code=503, detail="KYC service unavailable — Gemini API key not configured")
+
+    prompt = f"""You are a KYC document verification system. Analyze this image carefully.
+
+The user claims this is a **{id_type}** identity document (one of: aadhaar, pan, driving_license, voter_id).
+
+Respond ONLY with a JSON object (no markdown, no code fences) with these fields:
+- "is_valid_document": boolean — true ONLY if this image clearly shows a real {id_type} document. false if it's a random photo, screenshot, meme, blank page, or anything that is NOT an actual government-issued ID document.
+- "rejection_reason": string or null — if is_valid_document is false, explain why (e.g., "Image does not contain any identity document", "Image is blurry and unreadable", "Document type does not match claimed type").
+- "extracted_name": string or null — the full name exactly as printed on the document. null if not readable.
+- "extracted_dob": string or null — date of birth in YYYY-MM-DD format exactly as on the document. null if not present or not readable.
+- "document_number_last4": string or null — last 4 digits/characters of the document number. null if not readable.
+- "confidence": float 0.0 to 1.0 — your overall confidence in the extraction accuracy. Use 0.0 if the document is invalid.
+
+Be strict: if the image is not clearly a {id_type} document, set is_valid_document to false and confidence to 0.0."""
+
+    try:
+        response = await asyncio.to_thread(
+            _gemini_model.generate_content, [prompt, _image_part(image_data)]
+        )
+        text = response.text.strip()
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        result = json.loads(text)
+    except (json.JSONDecodeError, Exception) as exc:
+        logger.error("Gemini OCR parsing error: %s — raw: %s", exc, getattr(response, 'text', ''))
+        return {
+            "is_valid_document": False,
+            "rejection_reason": "Failed to process document image. Please upload a clearer photo.",
+            "extracted_name": None,
+            "extracted_dob": None,
+            "id_type": id_type,
+            "confidence": 0.0,
+            "ocr_status": "error",
+        }
+
+    is_valid = bool(result.get("is_valid_document"))
+    confidence = float(result.get("confidence", 0.0))
+    name = result.get("extracted_name")
+    dob = result.get("extracted_dob")
+
+    # Normalise DOB to YYYY-MM-DD if Gemini returned a slightly different format
+    if dob:
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                dob = datetime.strptime(dob, fmt).strftime("%Y-%m-%d")
+                break
+            except ValueError:
+                continue
+
     return {
-        "extracted_name": sample_names[idx],
-        "extracted_dob": sample_dobs[idx],
+        "is_valid_document": is_valid,
+        "rejection_reason": result.get("rejection_reason"),
+        "extracted_name": name,
+        "extracted_dob": dob,
+        "document_number_last4": result.get("document_number_last4"),
         "id_type": id_type,
         "confidence": round(confidence, 2),
-        "ocr_status": "success" if confidence > 0.6 else "low_confidence"
+        "ocr_status": "success" if is_valid and confidence >= 0.6 else "low_confidence" if is_valid else "invalid_document",
     }
 
+
 def check_age_18_plus(dob_str: str) -> dict:
-    """Check if person is 18+ based on DOB"""
+    """Check if person is 18+ based on DOB."""
+    if not dob_str:
+        return {"age": None, "is_18_plus": False, "verification_status": "dob_not_found"}
     try:
         dob = datetime.strptime(dob_str, "%Y-%m-%d").date()
         today = date.today()
@@ -1929,54 +1981,117 @@ def check_age_18_plus(dob_str: str) -> dict:
         return {
             "age": age,
             "is_18_plus": age >= 18,
-            "verification_status": "passed" if age >= 18 else "failed_underage"
+            "verification_status": "passed" if age >= 18 else "failed_underage",
         }
-    except:
+    except Exception:
         return {"age": None, "is_18_plus": False, "verification_status": "invalid_dob"}
 
-def simulate_face_detection(video_data: str) -> dict:
+
+async def gemini_face_liveness(selfie_data: str) -> dict:
     """
-    Simulates face detection and liveness check from selfie video.
-    In production, replace with AWS Rekognition or similar.
+    Use Gemini Vision to detect face presence and liveness from a selfie image.
+    Checks for a real human face (not a photo-of-photo, screen, printout, mask, etc.).
     """
-    data_size = len(video_data)
-    
-    # Simulate face detection confidence
-    face_confidence = random.uniform(0.75, 0.99)
-    
-    # Simulate blink detection (liveness)
-    blink_detected = random.random() > 0.15  # 85% success rate
-    
-    # Simulate liveness score
-    liveness_score = random.uniform(0.70, 0.98) if blink_detected else random.uniform(0.30, 0.60)
-    
+    if not _gemini_model:
+        raise HTTPException(status_code=503, detail="KYC service unavailable — Gemini API key not configured")
+
+    prompt = """You are a face liveness verification system. Analyze this selfie image carefully.
+
+Respond ONLY with a JSON object (no markdown, no code fences) with these fields:
+- "face_detected": boolean — true if a clear human face is visible in the image.
+- "face_count": integer — number of faces detected.
+- "is_live_person": boolean — true ONLY if this appears to be a real live person taking a selfie. false if it looks like a photo of a photo, a picture of a screen/monitor, a printed photo, a mask, a cartoon, or any non-live representation.
+- "liveness_issues": list of strings — any concerns (e.g., "appears to be photo of a screen", "face partially obscured", "multiple faces detected", "image too dark"). Empty list if no issues.
+- "face_confidence": float 0.0 to 1.0 — confidence that a real face is clearly visible.
+- "liveness_score": float 0.0 to 1.0 — confidence that this is a live person (1.0 = definitely live, 0.0 = definitely fake/spoofed).
+
+Be strict about liveness. Look for signs of spoofing: screen bezels, moiré patterns, reflections, paper edges, unnatural lighting, etc."""
+
+    try:
+        response = await asyncio.to_thread(
+            _gemini_model.generate_content, [prompt, _image_part(selfie_data)]
+        )
+        text = response.text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        result = json.loads(text)
+    except (json.JSONDecodeError, Exception) as exc:
+        logger.error("Gemini liveness parsing error: %s", exc)
+        return {
+            "face_detected": False,
+            "face_confidence": 0.0,
+            "blink_detected": False,
+            "liveness_score": 0.0,
+            "liveness_status": "error",
+        }
+
+    face_detected = bool(result.get("face_detected"))
+    liveness_score = float(result.get("liveness_score", 0.0))
+
     return {
-        "face_detected": face_confidence > 0.7,
-        "face_confidence": round(face_confidence, 2),
-        "blink_detected": blink_detected,
+        "face_detected": face_detected,
+        "face_count": result.get("face_count", 0),
+        "face_confidence": round(float(result.get("face_confidence", 0.0)), 2),
+        "is_live_person": bool(result.get("is_live_person")),
+        "liveness_issues": result.get("liveness_issues", []),
         "liveness_score": round(liveness_score, 2),
-        "liveness_status": "passed" if liveness_score > 0.75 else "needs_review"
+        "liveness_status": "passed" if liveness_score >= 0.75 else "needs_review",
     }
 
-def simulate_face_match(id_image_data: str, selfie_data: str) -> dict:
+
+async def gemini_face_match(id_image_data: str, selfie_data: str) -> dict:
     """
-    Simulates face matching between ID photo and selfie.
-    In production, replace with AWS Rekognition CompareFaces.
+    Use Gemini Vision to compare the face on the ID document with the selfie.
     """
-    # Simulate matching based on data characteristics
-    combined_size = len(id_image_data) + len(selfie_data)
-    
-    # Simulate match score
-    match_score = random.uniform(0.65, 0.99)
-    
-    # Higher threshold for auto-approval
-    is_match = match_score > 0.80
-    
+    if not _gemini_model:
+        raise HTTPException(status_code=503, detail="KYC service unavailable — Gemini API key not configured")
+
+    prompt = """You are a face matching verification system. You are given two images:
+1. First image: An identity document (ID card) that contains a photo of a person.
+2. Second image: A selfie taken by a person.
+
+Compare the faces and determine if they are the same person.
+
+Respond ONLY with a JSON object (no markdown, no code fences) with these fields:
+- "face_found_in_id": boolean — true if you can see a face/photo on the ID document.
+- "face_found_in_selfie": boolean — true if you can see a face in the selfie.
+- "is_match": boolean — true if the faces appear to be the same person. Consider that the ID photo may be older, different angle, or different lighting.
+- "match_score": float 0.0 to 1.0 — confidence that both images show the same person.
+- "mismatch_reasons": list of strings — reasons for doubt (e.g., "different facial structure", "ID photo too small to compare", "very different apparent ages"). Empty list if confident match.
+
+Be reasonably strict but account for normal differences between an ID photo and a live selfie (lighting, angle, aging)."""
+
+    try:
+        response = await asyncio.to_thread(
+            _gemini_model.generate_content,
+            [prompt, _image_part(id_image_data), _image_part(selfie_data)],
+        )
+        text = response.text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        result = json.loads(text)
+    except (json.JSONDecodeError, Exception) as exc:
+        logger.error("Gemini face match parsing error: %s", exc)
+        return {
+            "match_score": 0.0,
+            "is_match": False,
+            "match_status": "error",
+        }
+
+    match_score = float(result.get("match_score", 0.0))
+    is_match = bool(result.get("is_match", False))
+
     return {
+        "face_found_in_id": bool(result.get("face_found_in_id")),
+        "face_found_in_selfie": bool(result.get("face_found_in_selfie")),
         "match_score": round(match_score, 2),
         "is_match": is_match,
-        "match_status": "matched" if is_match else "needs_review"
+        "mismatch_reasons": result.get("mismatch_reasons", []),
+        "match_status": "matched" if is_match else "needs_review",
     }
+
 
 def determine_kyc_result(ocr_result: dict, age_check: dict, face_result: dict, match_result: dict) -> dict:
     """
@@ -1985,107 +2100,148 @@ def determine_kyc_result(ocr_result: dict, age_check: dict, face_result: dict, m
     Flag for manual review otherwise.
     """
     issues = []
-    
+
+    # Check document validity
+    if not ocr_result.get("is_valid_document"):
+        issues.append("invalid_document")
+
     # Check OCR confidence
-    if ocr_result["confidence"] < 0.75:
+    if ocr_result.get("confidence", 0) < 0.6:
         issues.append("low_ocr_confidence")
-    
+
     # Check age verification
-    if not age_check["is_18_plus"]:
+    if not age_check.get("is_18_plus"):
         issues.append("underage_or_invalid_dob")
-    
+
     # Check face detection
-    if not face_result["face_detected"]:
+    if not face_result.get("face_detected"):
         issues.append("face_not_detected")
-    
+
     # Check liveness
-    if face_result["liveness_score"] < 0.75:
+    if face_result.get("liveness_score", 0) < 0.75:
         issues.append("low_liveness_score")
-    
+
+    if not face_result.get("is_live_person"):
+        issues.append("liveness_failed")
+
     # Check face match
-    if not match_result["is_match"]:
+    if not match_result.get("is_match"):
         issues.append("face_mismatch")
-    
+
     # Determine final status
     if len(issues) == 0:
         return {
             "status": "verified",
             "auto_approved": True,
             "issues": [],
-            "message": "KYC verified automatically"
+            "message": "KYC verified automatically",
         }
     elif "underage_or_invalid_dob" in issues:
         return {
             "status": "rejected",
             "auto_approved": False,
             "issues": issues,
-            "message": "KYC rejected: Must be 18+ to use this platform"
+            "message": "KYC rejected: Must be 18+ to use this platform",
+        }
+    elif "invalid_document" in issues:
+        return {
+            "status": "rejected",
+            "auto_approved": False,
+            "issues": issues,
+            "message": "KYC rejected: Uploaded image is not a valid identity document",
         }
     else:
         return {
             "status": "pending_review",
             "auto_approved": False,
             "issues": issues,
-            "message": "KYC flagged for manual review"
+            "message": "KYC flagged for manual review",
         }
 
 @api_router.post("/kyc/upload-id")
 async def upload_kyc_id(req: KYCUploadIDRequest, user=Depends(get_current_user)):
-    """Step 1: Upload ID document and extract data via OCR"""
+    """Step 1: Upload ID document and extract data via Gemini Vision OCR"""
     if user["role"] != "listener":
         raise HTTPException(status_code=403, detail="Listeners only")
-    
+
     # Check if already verified
     existing = await db.kyc_submissions.find_one({"user_id": user["user_id"]})
     if existing and existing.get("status") == "verified":
         raise HTTPException(status_code=400, detail="KYC already verified")
-    
+
     # Validate ID type
     valid_types = ["aadhaar", "pan", "driving_license", "voter_id"]
     if req.id_type not in valid_types:
         raise HTTPException(status_code=400, detail=f"Invalid ID type. Must be one of: {valid_types}")
-    
-    # Simulate OCR extraction
-    ocr_result = simulate_ocr_extraction(req.id_type, req.id_image_base64)
-    
+
+    # Real OCR extraction via Gemini Vision
+    ocr_result = await gemini_ocr_extraction(req.id_type, req.id_image_base64)
+
+    # Reject immediately if the image is not a valid document
+    if not ocr_result.get("is_valid_document"):
+        reason = ocr_result.get("rejection_reason") or "Uploaded image is not a valid identity document."
+        return {
+            "success": False,
+            "step": 0,
+            "extracted_data": None,
+            "age_verification": None,
+            "next_step": None,
+            "message": reason,
+        }
+
+    # Reject if name or DOB could not be extracted
+    if not ocr_result.get("extracted_name") or not ocr_result.get("extracted_dob"):
+        return {
+            "success": False,
+            "step": 0,
+            "extracted_data": {
+                "name": ocr_result.get("extracted_name"),
+                "dob": ocr_result.get("extracted_dob"),
+                "confidence": ocr_result.get("confidence", 0),
+            },
+            "age_verification": None,
+            "next_step": None,
+            "message": "Could not read name or date of birth from the document. Please upload a clearer photo.",
+        }
+
     # Check age from extracted DOB
     age_check = check_age_18_plus(ocr_result["extracted_dob"])
-    
-    # Store KYC step 1 data
+
+    # Store KYC step 1 data — keep full image for face matching later
     kyc_data = {
         "user_id": user["user_id"],
         "step": 1,
         "id_type": req.id_type,
-        "id_image": req.id_image_base64[:100] + "...",  # Store truncated for demo
+        "id_image": req.id_image_base64,
         "ocr_result": ocr_result,
         "age_check": age_check,
         "status": "id_uploaded",
-        "updated_at": now()
+        "updated_at": now(),
     }
-    
+
     await db.kyc_submissions.update_one(
         {"user_id": user["user_id"]},
         {"$set": kyc_data},
-        upsert=True
+        upsert=True,
     )
-    
+
     # Update profile status
     await db.listener_profiles.update_one(
         {"user_id": user["user_id"]},
-        {"$set": {"kyc_status": "in_progress"}}
+        {"$set": {"kyc_status": "in_progress"}},
     )
-    
+
     return {
         "success": True,
         "step": 1,
         "extracted_data": {
             "name": ocr_result["extracted_name"],
             "dob": ocr_result["extracted_dob"],
-            "confidence": ocr_result["confidence"]
+            "confidence": ocr_result["confidence"],
         },
         "age_verification": age_check,
         "next_step": "upload_selfie" if age_check["is_18_plus"] else None,
-        "message": "ID processed. Please verify extracted data." if age_check["is_18_plus"] else "Age verification failed. Must be 18+"
+        "message": "ID processed. Please verify extracted data." if age_check["is_18_plus"] else "Age verification failed. Must be 18+",
     }
 
 @api_router.post("/kyc/confirm-id-data")
@@ -2112,65 +2268,68 @@ async def confirm_kyc_id_data(user=Depends(get_current_user)):
 
 @api_router.post("/kyc/upload-selfie")
 async def upload_kyc_selfie(req: KYCSelfieVideoRequest, user=Depends(get_current_user)):
-    """Step 3: Upload selfie video for face detection and liveness check"""
+    """Step 3: Upload selfie for face detection, liveness check, and face matching"""
     kyc = await db.kyc_submissions.find_one({"user_id": user["user_id"]})
     if not kyc:
         raise HTTPException(status_code=400, detail="Please upload ID first")
-    
+
     if kyc.get("status") == "verified":
         raise HTTPException(status_code=400, detail="KYC already verified")
-    
-    # Simulate face detection and liveness
-    face_result = simulate_face_detection(req.video_base64)
-    
-    # Simulate face matching with ID photo
+
+    # Run liveness detection and face matching in parallel via Gemini Vision
     id_image = kyc.get("id_image", "")
-    match_result = simulate_face_match(id_image, req.video_base64)
-    
+    face_result, match_result = await asyncio.gather(
+        gemini_face_liveness(req.video_base64),
+        gemini_face_match(id_image, req.video_base64),
+    )
+
     # Determine final KYC result
     final_result = determine_kyc_result(
         kyc.get("ocr_result", {}),
         kyc.get("age_check", {}),
         face_result,
-        match_result
+        match_result,
     )
-    
-    # Update KYC with all results
+
+    # Update KYC with all results (don't store full selfie image, just a truncated ref)
     update_data = {
         "step": 3,
-        "selfie_data": req.video_base64[:100] + "...",  # Store truncated
+        "selfie_data": req.video_base64[:100] + "...",
         "face_detection": face_result,
         "face_match": match_result,
         "final_result": final_result,
         "status": final_result["status"],
         "completed_at": now(),
-        "updated_at": now()
+        "updated_at": now(),
     }
-    
+
     await db.kyc_submissions.update_one(
         {"user_id": user["user_id"]},
-        {"$set": update_data}
+        {"$set": update_data},
     )
-    
+
     # Update profile KYC status
     await db.listener_profiles.update_one(
         {"user_id": user["user_id"]},
-        {"$set": {"kyc_status": final_result["status"]}}
+        {"$set": {"kyc_status": final_result["status"]}},
     )
-    
+
     return {
         "success": True,
         "step": 3,
         "face_detection": {
-            "face_detected": face_result["face_detected"],
-            "liveness_passed": face_result["liveness_score"] > 0.75
+            "face_detected": face_result.get("face_detected", False),
+            "liveness_passed": face_result.get("liveness_score", 0) >= 0.75,
+            "is_live_person": face_result.get("is_live_person", False),
+            "liveness_issues": face_result.get("liveness_issues", []),
         },
         "face_match": {
-            "match_score": match_result["match_score"],
-            "matched": match_result["is_match"]
+            "match_score": match_result.get("match_score", 0),
+            "matched": match_result.get("is_match", False),
+            "mismatch_reasons": match_result.get("mismatch_reasons", []),
         },
         "final_result": final_result,
-        "message": final_result["message"]
+        "message": final_result["message"],
     }
 
 @api_router.get("/kyc/status")
