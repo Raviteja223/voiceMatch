@@ -152,6 +152,9 @@ class FavoriteToggleRequest(BaseModel):
 class TipRequest(BaseModel):
     amount: float
 
+class RematchRequest(BaseModel):
+    call_id: str
+
 # ─── HELPERS ───────────────────────────────────────────
 def create_token(user_id: str, role: str) -> str:
     payload = {
