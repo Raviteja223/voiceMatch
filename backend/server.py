@@ -149,6 +149,9 @@ class PushTokenRequest(BaseModel):
 class FavoriteToggleRequest(BaseModel):
     listener_id: str
 
+class TipRequest(BaseModel):
+    amount: float
+
 # ─── HELPERS ───────────────────────────────────────────
 def create_token(user_id: str, role: str) -> str:
     payload = {
