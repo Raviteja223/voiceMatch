@@ -65,13 +65,8 @@ export default function LoginScreen() {
       if (!firebaseToken) throw new Error('Failed to retrieve authentication token');
 
       const device_id = await getDeviceId();
-      const res = await api.post('/auth/firebase-verify', {
-        firebase_token: firebaseToken,
-        phone: `+91${phone}`,
-        device_id,
-      });
-
-      api.setToken(res.token);
+      const res = await api.post('/auth/verify-otp', { phone: `+91${phone}`, otp, device_id });
+      await api.setToken(res.token);
       await saveUser(res.user);
 
       if (res.needs_gender) {
@@ -103,7 +98,7 @@ export default function LoginScreen() {
         style={styles.flex}
       >
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          <TouchableOpacity testID="login-back-btn" onPress={() => router.back()} style={styles.backBtn}>
+          <TouchableOpacity testID="login-back-btn" onPress={() => router.replace('/')} style={styles.backBtn}>
             <Ionicons name="arrow-back" size={24} color="#2D3748" />
           </TouchableOpacity>
 
