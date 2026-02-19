@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
   KeyboardAvoidingView, Platform, ActivityIndicator, Alert, ScrollView,
@@ -7,6 +7,8 @@ import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { FirebaseAuthTypes } from '@react-native-firebase/auth';
+import { sendFirebaseOtp, getFirebaseIdToken } from '../../src/firebase';
 import api from '../../src/api';
 import { saveUser } from '../../src/store';
 
@@ -29,33 +31,47 @@ export default function LoginScreen() {
   const [otp, setOtp] = useState('');
   const [step, setStep] = useState<'phone' | 'otp'>('phone');
   const [loading, setLoading] = useState(false);
+  const confirmationRef = useRef<FirebaseAuthTypes.ConfirmationResult | null>(null);
 
   const sendOtp = async () => {
     if (phone.length < 10) return Alert.alert('Error', 'Enter a valid phone number');
     setLoading(true);
     try {
-      await api.post('/auth/send-otp', { phone: `+91${phone}` });
+      const confirmation = await sendFirebaseOtp(`+91${phone}`);
+      confirmationRef.current = confirmation;
       setStep('otp');
     } catch (e: any) {
-      Alert.alert('Error', e.message);
+      const msg =
+        e.code === 'auth/invalid-phone-number'
+          ? 'Invalid phone number format.'
+          : e.code === 'auth/too-many-requests'
+            ? 'Too many attempts. Please try again later.'
+            : e.message || 'Failed to send OTP';
+      Alert.alert('Error', msg);
     }
     setLoading(false);
   };
 
   const verifyOtp = async () => {
-    if (otp.length !== 4) return Alert.alert('Error', 'Enter 4-digit OTP');
+    if (otp.length !== 6) return Alert.alert('Error', 'Enter the 6-digit OTP');
+    if (!confirmationRef.current) return Alert.alert('Error', 'Please request OTP first');
     setLoading(true);
     try {
+      // Confirm the OTP with Firebase
+      await confirmationRef.current.confirm(otp);
+
+      // Get Firebase ID token to send to our backend
+      const firebaseToken = await getFirebaseIdToken();
+      if (!firebaseToken) throw new Error('Failed to retrieve authentication token');
+
       const device_id = await getDeviceId();
       const res = await api.post('/auth/verify-otp', { phone: `+91${phone}`, otp, device_id });
       await api.setToken(res.token);
       await saveUser(res.user);
 
       if (res.needs_gender) {
-        // First time user - ask gender
         router.replace('/auth/gender');
       } else {
-        // Returning user - route based on role
         const role = res.user.role;
         if (!res.user.onboarded) {
           router.replace(role === 'seeker' ? '/onboarding/seeker' : '/onboarding/listener');
@@ -64,7 +80,13 @@ export default function LoginScreen() {
         }
       }
     } catch (e: any) {
-      Alert.alert('Error', e.message);
+      const msg =
+        e.code === 'auth/invalid-verification-code'
+          ? 'Invalid OTP. Please check and try again.'
+          : e.code === 'auth/session-expired'
+            ? 'OTP expired. Please request a new one.'
+            : e.message || 'Verification failed';
+      Alert.alert('Error', msg);
     }
     setLoading(false);
   };
@@ -85,7 +107,7 @@ export default function LoginScreen() {
             <Text style={styles.subtitle}>
               {step === 'phone'
                 ? 'Sign in with your phone number'
-                : `OTP sent to +91${phone} (use 1234)`}
+                : `OTP sent to +91${phone}`}
             </Text>
           </View>
 
@@ -123,36 +145,40 @@ export default function LoginScreen() {
 
           {step === 'otp' && (
             <>
-              <Text style={styles.label}>4-Digit OTP</Text>
+              <Text style={styles.label}>6-Digit OTP</Text>
               <TextInput
                 testID="otp-input"
                 style={styles.otpInput}
-                placeholder="1234"
+                placeholder="------"
                 placeholderTextColor="#A0AEC0"
                 keyboardType="number-pad"
-                maxLength={4}
+                maxLength={6}
                 value={otp}
                 onChangeText={setOtp}
                 autoFocus
               />
               <View style={styles.otpHint}>
                 <Ionicons name="information-circle" size={16} color="#A2E3C4" />
-                <Text style={styles.hintText}>Demo OTP: 1234</Text>
+                <Text style={styles.hintText}>Check your SMS for the OTP</Text>
               </View>
 
               <TouchableOpacity
                 testID="verify-otp-btn"
-                style={[styles.primaryBtn, otp.length !== 4 && styles.btnDisabled]}
+                style={[styles.primaryBtn, otp.length !== 6 && styles.btnDisabled]}
                 onPress={verifyOtp}
-                disabled={loading || otp.length !== 4}
+                disabled={loading || otp.length !== 6}
               >
                 {loading ? <ActivityIndicator color="#fff" /> : (
                   <Text style={styles.btnText}>Verify & Continue</Text>
                 )}
               </TouchableOpacity>
 
-              <TouchableOpacity testID="change-phone-btn" onPress={() => { setStep('phone'); setOtp(''); }} style={styles.linkBtn}>
+              <TouchableOpacity testID="change-phone-btn" onPress={() => { setStep('phone'); setOtp(''); confirmationRef.current = null; }} style={styles.linkBtn}>
                 <Text style={styles.linkText}>Change phone number</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity testID="resend-otp-btn" onPress={sendOtp} disabled={loading} style={styles.linkBtn}>
+                <Text style={styles.linkText}>Resend OTP</Text>
               </TouchableOpacity>
             </>
           )}
