@@ -65,7 +65,11 @@ export default function LoginScreen() {
       if (!firebaseToken) throw new Error('Failed to retrieve authentication token');
 
       const device_id = await getDeviceId();
-      const res = await api.post('/auth/verify-otp', { phone: `+91${phone}`, otp, device_id });
+      const res = await api.post('/auth/firebase-verify', {
+        firebase_token: firebaseToken,
+        phone: `+91${phone}`,
+        device_id,
+      });
       await api.setToken(res.token);
       await saveUser(res.user);
 
