@@ -7,9 +7,9 @@
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:504322443175:android:1455c553232656c1515882",
+        "mobilesdk_app_id": "1:504322443175:android:6fa29e254e3a59cf515882",
         "android_client_info": {
-          "package_name": "konnectra.app"
+          "package_name": "com.raviteja_1998.konnectra"
         }
       },
       "oauth_client": [],

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "504322443175",
+    "project_id": "voicematch-7640d",
+    "storage_bucket": "voicematch-7640d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:504322443175:android:1455c553232656c1515882",
+        "android_client_info": {
+          "package_name": "konnectra.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBCap4vYfqi_hv6SKFQKfsmoSOJwYEvAV8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
